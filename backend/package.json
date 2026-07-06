@@ -1,0 +1,35 @@
+{
+  "name": "ai-analytics-backend",
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "db:migrate": "node scripts/migrate.js",
+    "test": "node --test src/utils/sqlGuard.test.js src/utils/insightBuilder.test.js src/utils/chartRules.test.js"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.2",
+    "@ai-sdk/google": "^4.0.2",
+    "@ai-sdk/openai": "^4.0.3",
+    "ai": "^7.0.5",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "mysql2": "^3.11.5",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.16",
+    "pdf-parse": "^1.1.1",
+    "pg": "^8.13.3",
+    "uuid": "^11.1.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
