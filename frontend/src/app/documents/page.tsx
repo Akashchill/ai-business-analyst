@@ -2,8 +2,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { useRouter } from 'next/navigation';
-import { Upload, FileText, Trash2, BookOpen, Loader2, ArrowLeft, AlertCircle } from 'lucide-react';
-import { listDocuments, uploadDocument, deleteDocument, Document } from '@/lib/api';
+import { Upload, FileText, Trash2, BookOpen, Loader2, ArrowLeft, AlertCircle, Download } from 'lucide-react';
+import { listDocuments, uploadDocument, deleteDocument, getDocumentDownloadUrl, Document } from '@/lib/api';
 
 const DOC_TYPES = ['annual_report', 'sop', 'product_docs', 'meeting_notes', 'financial', 'general'];
 
@@ -16,6 +16,7 @@ export default function DocumentsPage() {
   const [error, setError] = useState('');
   const [docType, setDocType] = useState('general');
   const [dragOver, setDragOver] = useState(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -47,6 +48,27 @@ export default function DocumentsPage() {
     if (!confirm('Remove this document from the knowledge base?')) return;
     await deleteDocument(id, token!);
     setDocs(d => d.filter(doc => doc.id !== id));
+  }
+
+  async function handleDownload(doc: Document) {
+    if (!token || !doc.hasOriginalFile) return;
+    setDownloadingId(doc.id);
+    setError('');
+    try {
+      const { downloadUrl, filename } = await getDocumentDownloadUrl(doc.id, token);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = filename;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Download failed');
+    } finally {
+      setDownloadingId(null);
+    }
   }
 
   const canUpload = user?.permissions?.canUploadDocs;
@@ -136,12 +158,28 @@ export default function DocumentsPage() {
                 </div>
                 <p className="text-xs text-slate-600 mt-1.5 truncate">{doc.preview}</p>
               </div>
-              {canUpload && (
-                <button onClick={() => handleDelete(doc.id)}
-                  className="text-slate-600 hover:text-red-400 transition-colors flex-shrink-0">
-                  <Trash2 size={15} />
-                </button>
-              )}
+              <div className="flex items-center gap-1 flex-shrink-0">
+                {doc.hasOriginalFile ? (
+                  <button
+                    onClick={() => handleDownload(doc)}
+                    disabled={downloadingId === doc.id}
+                    title="Download original file"
+                    className="text-slate-600 hover:text-cyan-400 transition-colors disabled:opacity-50 p-1"
+                  >
+                    {downloadingId === doc.id ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+                  </button>
+                ) : (
+                  <span title="Original not stored" className="text-slate-700 p-1 cursor-not-allowed">
+                    <Download size={15} />
+                  </span>
+                )}
+                {canUpload && (
+                  <button onClick={() => handleDelete(doc.id)}
+                    className="text-slate-600 hover:text-red-400 transition-colors p-1">
+                    <Trash2 size={15} />
+                  </button>
+                )}
+              </div>
             </div>
           ))}
         </div>

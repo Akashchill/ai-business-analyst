@@ -121,6 +121,7 @@ POST /api/auth/register       (admin only)
 ```
 POST   /api/docs/upload       multipart/form-data (file, docType)
 GET    /api/docs              list all documents
+GET    /api/docs/:id/download presigned URL for original file (5 min expiry)
 DELETE /api/docs/:id          remove document
 ```
 
@@ -171,6 +172,40 @@ SMTP_PASS=your-app-password   # Gmail App Password, not login password
 ```
 
 Cron examples: `0 9 * * 1` = every Monday 9am, `0 9 * * *` = every day 9am
+
+---
+
+## 📦 Document storage (S3)
+
+Original uploaded files (PDF, TXT, MD) can be stored in a **private AWS S3 bucket** while text chunks and embeddings remain in PostgreSQL (pgvector).
+
+### Required env vars
+
+```env
+S3_ENABLED=true
+AWS_REGION=ap-south-1
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
+S3_BUCKET_NAME=your-bucket-name
+S3_PREFIX=documents/
+```
+
+Set `S3_ENABLED=false` to disable S3 — RAG ingestion still works, but originals cannot be downloaded.
+
+### Bucket & IAM
+
+- The bucket must be **private** (no public ACL or bucket policy allowing anonymous reads).
+- Access is only via short-lived presigned URLs from `GET /api/docs/:id/download`.
+- IAM policy for the app user needs at minimum:
+  - `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` on `arn:aws:s3:::your-bucket-name/documents/*`
+
+### Migration
+
+Run `npm run db:migrate` in `backend/` to apply `003_rag_documents_s3.sql` (adds `s3_bucket`, `s3_key`, `file_size_bytes` to `rag_documents`).
+
+### Legacy documents
+
+Documents uploaded before S3 was enabled have no `s3_key` and return **404 — Original file not available** on download. RAG search over their chunks is unaffected.
 
 ---
 

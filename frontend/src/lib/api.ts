@@ -101,6 +101,9 @@ export async function agentQuery(
 export interface Document {
   id: string; filename: string; docType: string; uploadedAt: string;
   chunkCount: number; characterCount: number; preview: string;
+  fileSizeBytes?: number | null;
+  hasOriginalFile?: boolean;
+  downloadAvailable?: boolean;
 }
 
 export async function uploadDocument(file: File, docType: string, token: string): Promise<Document> {
@@ -124,6 +127,18 @@ export async function listDocuments(token: string): Promise<Document[]> {
 
 export async function deleteDocument(id: string, token: string): Promise<void> {
   await fetch(`${API_BASE}/api/docs/${id}`, { method: 'DELETE', headers: authHeader(token) });
+}
+
+export async function getDocumentDownloadUrl(
+  id: string,
+  token: string
+): Promise<{ downloadUrl: string; filename: string; expiresIn?: number }> {
+  const res = await fetch(`${API_BASE}/api/docs/${id}/download`, { headers: authHeader(token) });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || 'Download failed');
+  }
+  return res.json();
 }
 
 // ── Reports ───────────────────────────────────────────────────────────────────

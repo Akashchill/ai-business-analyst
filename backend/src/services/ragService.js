@@ -16,6 +16,7 @@ import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { getPostgresPool } from '../config/database.js';
 import { embedText, embedBatch, toVectorLiteral } from '../config/ai.js';
+import * as s3Service from './s3Service.js';
 
 // ── Text extraction ──────────────────────────────────────────────────────────
 
@@ -51,7 +52,10 @@ function chunkText(text, chunkSize = 400, overlap = 75) {
 
 // ── Ingestion: file → text → chunks → embeddings → Postgres ─────────────────
 
-export async function ingestDocument({ filePath, filename, mimetype, uploadedBy, docType = 'general' }) {
+export async function ingestDocument({
+  filePath, filename, mimetype, uploadedBy, docType = 'general',
+  id: docIdOverride, s3Bucket = null, s3Key = null, fileSizeBytes = null,
+}) {
   const pool = getPostgresPool();
   const text = await extractText(filePath, mimetype);
   if (!text?.trim()) throw new Error('Could not extract text from document');
@@ -73,11 +77,11 @@ export async function ingestDocument({ filePath, filename, mimetype, uploadedBy,
   try {
     await client.query('BEGIN');
 
-    const docId = uuidv4();
+    const docId = docIdOverride || uuidv4();
     await client.query(
-      `INSERT INTO rag_documents (id, filename, mimetype, doc_type, uploaded_by, character_count, chunk_count, preview)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [docId, filename, mimetype, docType, uploadedBy || null, text.length, textChunks.length, text.slice(0, 300)]
+      `INSERT INTO rag_documents (id, filename, mimetype, doc_type, uploaded_by, character_count, chunk_count, preview, s3_bucket, s3_key, file_size_bytes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [docId, filename, mimetype, docType, uploadedBy || null, text.length, textChunks.length, text.slice(0, 300), s3Bucket, s3Key, fileSizeBytes]
     );
 
     for (let i = 0; i < textChunks.length; i++) {
@@ -102,6 +106,9 @@ export async function ingestDocument({ filePath, filename, mimetype, uploadedBy,
       chunkCount: textChunks.length,
       characterCount: text.length,
       preview: text.slice(0, 300),
+      fileSizeBytes: fileSizeBytes ?? null,
+      hasOriginalFile: Boolean(s3Key),
+      downloadAvailable: Boolean(s3Key),
     };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -163,24 +170,49 @@ export async function listDocuments() {
   const result = await pool.query(
     `SELECT id, filename, mimetype, doc_type AS "docType", uploaded_by AS "uploadedBy",
             character_count AS "characterCount", chunk_count AS "chunkCount",
-            preview, uploaded_at AS "uploadedAt"
+            preview, uploaded_at AS "uploadedAt",
+            file_size_bytes AS "fileSizeBytes",
+            (s3_key IS NOT NULL) AS "hasOriginalFile"
      FROM rag_documents ORDER BY uploaded_at DESC`
   );
   return result.rows;
+}
+
+export async function getDocumentForDownload(docId) {
+  const pool = getPostgresPool();
+  const result = await pool.query(
+    `SELECT id, filename, mimetype, s3_bucket AS "s3Bucket", s3_key AS "s3Key"
+     FROM rag_documents WHERE id = $1`,
+    [docId]
+  );
+  return result.rows[0] || null;
 }
 
 export async function deleteDocument(docId) {
   const pool = getPostgresPool();
   const client = await pool.connect();
   try {
-    const existing = await client.query('SELECT id FROM rag_documents WHERE id = $1', [docId]);
+    const existing = await client.query(
+      'SELECT id, s3_bucket, s3_key FROM rag_documents WHERE id = $1',
+      [docId]
+    );
     if (!existing.rows.length) return { existed: false, chunksRemoved: 0 };
+
+    const { s3_bucket: s3Bucket, s3_key: s3Key } = existing.rows[0];
 
     const countRes = await client.query('SELECT COUNT(*) FROM rag_chunks WHERE doc_id = $1', [docId]);
     const chunksRemoved = parseInt(countRes.rows[0].count);
 
     // ON DELETE CASCADE handles rag_chunks automatically
     await client.query('DELETE FROM rag_documents WHERE id = $1', [docId]);
+
+    if (s3Key) {
+      try {
+        await s3Service.deleteFile(s3Key, s3Bucket || undefined);
+      } catch (err) {
+        console.error(`Best-effort S3 delete failed for document ${docId}:`, err.message);
+      }
+    }
 
     return { existed: true, chunksRemoved };
   } finally {
