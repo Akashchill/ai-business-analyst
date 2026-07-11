@@ -1,12 +1,18 @@
 'use client';
 import { useState, useEffect, useRef, useCallback } from 'react';
+import dynamic from 'next/dynamic';
 import { useRouter } from 'next/navigation';
 import { Send, BarChart3, RefreshCw, PanelLeftClose, PanelLeftOpen, LogIn } from 'lucide-react';
 import MessageBubble from '@/components/chat/MessageBubble';
-import SuggestionChips from '@/components/chat/SuggestionChips';
-import Sidebar from '@/components/layout/Sidebar';
 import { useAuth } from '@/hooks/useAuth';
 import { agentQuery, fetchSuggestions, AgentResult, AuthError } from '@/lib/api';
+
+const Sidebar = dynamic(() => import('@/components/layout/Sidebar'), {
+  ssr: false,
+  loading: () => (
+    <aside className="w-64 bg-slate-900 border-r border-slate-800 flex-shrink-0 animate-pulse" />
+  ),
+});
 
 interface Message {
   id: string;
@@ -16,21 +22,46 @@ interface Message {
   loading?: boolean;
 }
 
+const STARTER_QUESTIONS = [
+  'How many users are there?',
+  'What is total revenue this month?',
+  'Show top 10 customers by spend',
+  'What are monthly sales trends this year?',
+];
+
 export default function HomePage() {
   const { user, token, loading: authLoading } = useAuth();
   const router = useRouter();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestions, setSuggestions] = useState<string[]>(STARTER_QUESTIONS);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const historyRef = useRef<{ role: string; content: string }[]>([]);
 
+  // Load AI suggestions in background after idle — never block first paint
   useEffect(() => {
-    fetchSuggestions().then(setSuggestions);
+    let cancelled = false;
+    const load = () => {
+      fetchSuggestions()
+        .then(s => { if (!cancelled && s.length) setSuggestions(s); })
+        .catch(() => {});
+    };
+    let idleId: number | undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      idleId = window.requestIdleCallback(load, { timeout: 3000 });
+    } else {
+      timeoutId = setTimeout(load, 2500);
+    }
+    return () => {
+      cancelled = true;
+      if (idleId != null && 'cancelIdleCallback' in window) window.cancelIdleCallback(idleId);
+      if (timeoutId != null) clearTimeout(timeoutId);
+    };
   }, []);
 
   useEffect(() => {
@@ -87,18 +118,7 @@ export default function HomePage() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(input); }
   }
 
-  if (authLoading) {
-    return <div className="min-h-screen bg-surface-950 flex items-center justify-center">
-      <RefreshCw size={24} className="text-indigo-400 animate-spin" />
-    </div>;
-  }
-
   const isEmpty = messages.length === 0;
-
-  const STARTER_QUESTIONS = [
-    'How many users are there?', 'What is total revenue this month?',
-    'Show top 10 customers by spend', 'What are monthly sales trends this year?',
-  ];
 
   return (
     <div className="flex h-screen bg-surface-950 overflow-hidden">
@@ -120,7 +140,11 @@ export default function HomePage() {
             <span className="text-xs text-slate-500 ml-2 hidden sm:inline">Business Intelligence</span>
           </div>
           <div className="flex-1" />
-          {!user ? (
+          {authLoading ? (
+            <span className="text-xs text-slate-600 flex items-center gap-1.5">
+              <RefreshCw size={11} className="animate-spin" /> …
+            </span>
+          ) : !user ? (
             <button onClick={() => router.push('/login')}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs rounded-lg transition-colors">
               <LogIn size={13} /> Sign in
@@ -141,11 +165,11 @@ export default function HomePage() {
                 <h1 className="text-2xl font-bold text-white mb-2">Ask your data anything</h1>
                 <p className="text-sm text-slate-500 leading-relaxed">
                   Powered by a 5-agent AI pipeline: Planner → SQL → RAG → Visualization → Insight.
-                  {!user && <><br/><span className="text-indigo-400 cursor-pointer" onClick={() => router.push('/login')}>Sign in</span> to ask questions and use analytics.</>}
+                  {!user && !authLoading && <><br/><span className="text-indigo-400 cursor-pointer" onClick={() => router.push('/login')}>Sign in</span> to ask questions and use analytics.</>}
                 </p>
               </div>
               <div className="grid grid-cols-2 gap-2 w-full">
-                {STARTER_QUESTIONS.map(q => (
+                {suggestions.slice(0, 4).map(q => (
                   <button key={q} onClick={() => handleSubmit(q)}
                     className="text-left text-xs p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 hover:border-indigo-600 transition-all">
                     {q}
@@ -162,10 +186,6 @@ export default function HomePage() {
             </>
           )}
         </div>
-
-        {suggestions.length > 0 && isEmpty && (
-          <SuggestionChips suggestions={suggestions} onSelect={handleSubmit} />
-        )}
 
         {/* Input */}
         <div className="px-4 py-3 border-t border-slate-800 bg-slate-900/50">

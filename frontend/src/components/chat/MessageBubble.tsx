@@ -1,10 +1,17 @@
 'use client';
 import { useState } from 'react';
+import dynamic from 'next/dynamic';
 import { Download, Code2, ChevronDown, ChevronUp, Clock, Rows3, BookmarkPlus, Check } from 'lucide-react';
-import ChartRenderer from '@/components/charts/ChartRenderer';
 import InsightCard from '@/components/insights/InsightCard';
 import { AgentResult, highlightSQL, exportToCSV, saveReport } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
+
+const ChartRenderer = dynamic(() => import('@/components/charts/ChartRenderer'), {
+  ssr: false,
+  loading: () => (
+    <div className="h-48 rounded-xl bg-slate-800/60 animate-pulse" />
+  ),
+});
 
 interface MessageProps {
   role: 'user' | 'assistant';

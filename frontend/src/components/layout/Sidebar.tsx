@@ -1,6 +1,6 @@
 'use client';
-import { useState, useEffect } from 'react';
-import { History, Database, Trash2, ChevronRight, TableProperties, Clock, CheckCircle2, XCircle, BookOpen, BookmarkCheck, LogOut, User, Shield } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { History, Database, ChevronRight, TableProperties, Clock, CheckCircle2, XCircle, BookOpen, BookmarkCheck, LogOut, User, Shield } from 'lucide-react';
 import { fetchHistory, fetchSchema, checkHealth } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
 import Link from 'next/link';
@@ -19,24 +19,33 @@ export default function Sidebar({ onSelectHistory, refreshKey }: SidebarProps) {
   const [schema, setSchema] = useState<any>({});
   const [expanded, setExpanded] = useState<string|null>(null);
   const [dbStatus, setDbStatus] = useState<string>('checking');
+  const schemaLoadedRef = useRef(false);
 
-  useEffect(() => { loadHistory(); }, [token, refreshKey]);
+  // Single effect: load history when token/refresh changes and history tab is active
   useEffect(() => {
-    if (tab === 'schema' && !Object.keys(schema).length) loadSchema();
-    if (tab === 'history') loadHistory();
-  }, [tab]);
-  useEffect(() => {
-    checkHealth().then(h => setDbStatus(h.database));
-  }, []);
+    if (tab !== 'history') return;
+    let cancelled = false;
+    fetchHistory(token).then(h => { if (!cancelled) setHistory(h); });
+    return () => { cancelled = true; };
+  }, [token, refreshKey, tab]);
 
-  async function loadHistory() {
-    const h = await fetchHistory(token);
-    setHistory(h);
-  }
-  async function loadSchema() {
-    const data = await fetchSchema(token);
-    setSchema((data as any).schema || {});
-  }
+  // Health + schema only when user opens Schema tab (not on mount)
+  useEffect(() => {
+    if (tab !== 'schema') return;
+    let cancelled = false;
+    checkHealth().then(h => { if (!cancelled) setDbStatus(h.database); });
+    if (!schemaLoadedRef.current) {
+      fetchSchema(token)
+        .then(data => {
+          if (!cancelled) {
+            setSchema((data as any).schema || {});
+            schemaLoadedRef.current = true;
+          }
+        })
+        .catch(() => {});
+    }
+    return () => { cancelled = true; };
+  }, [tab, token]);
 
   function rel(iso: string) {
     const diff = Date.now() - new Date(iso).getTime();

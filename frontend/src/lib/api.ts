@@ -4,7 +4,26 @@ export class AuthError extends Error {
     this.name = 'AuthError';
   }
 }
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
+/** Relative base so requests go through Next.js rewrites (/api → backend). */
+const API_BASE = '';
+
+const DEFAULT_TIMEOUT_MS = 5000;
+
+/** Shared fetch with AbortController timeout (default 5s). */
+export async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = DEFAULT_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function handleResponse<T>(res: Response): Promise<T> {
   const data = await res.json().catch(() => ({}));
@@ -22,7 +41,7 @@ export interface User {
 }
 
 export async function login(email: string, password: string): Promise<{ token: string; user: User }> {
-  const res = await fetch(`${API_BASE}/api/auth/login`, {
+  const res = await fetchWithTimeout(`${API_BASE}/api/auth/login`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
   });
@@ -31,13 +50,13 @@ export async function login(email: string, password: string): Promise<{ token: s
 }
 
 export async function getMe(token: string): Promise<User> {
-  const res = await fetch(`${API_BASE}/api/auth/me`, { headers: authHeader(token) });
+  const res = await fetchWithTimeout(`${API_BASE}/api/auth/me`, { headers: authHeader(token) });
   if (!res.ok) throw new Error('Unauthorized');
   const data = await res.json();
   return data.user;
 }
 
-export function authHeader(token?: string | null) {
+export function authHeader(token?: string | null): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -88,11 +107,11 @@ export async function agentQuery(
   history: { role: string; content: string }[] = [],
   dbType = 'postgresql'
 ): Promise<AgentResult> {
-  const res = await fetch(`${API_BASE}/api/agent/query`, {
+  const res = await fetchWithTimeout(`${API_BASE}/api/agent/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeader(token) },
     body: JSON.stringify({ question, history, dbType }),
-  });
+  }, 60_000);
   return handleResponse<AgentResult>(res);
 }
 
@@ -110,30 +129,30 @@ export async function uploadDocument(file: File, docType: string, token: string)
   const fd = new FormData();
   fd.append('file', file);
   fd.append('docType', docType);
-  const res = await fetch(`${API_BASE}/api/docs/upload`, {
+  const res = await fetchWithTimeout(`${API_BASE}/api/docs/upload`, {
     method: 'POST', headers: authHeader(token), body: fd,
-  });
+  }, 60_000);
   if (!res.ok) throw new Error((await res.json()).error || 'Upload failed');
   const data = await res.json();
   return data.document;
 }
 
 export async function listDocuments(token: string): Promise<Document[]> {
-  const res = await fetch(`${API_BASE}/api/docs`, { headers: authHeader(token) });
+  const res = await fetchWithTimeout(`${API_BASE}/api/docs`, { headers: authHeader(token) });
   if (!res.ok) return [];
   const data = await res.json();
   return data.documents;
 }
 
 export async function deleteDocument(id: string, token: string): Promise<void> {
-  await fetch(`${API_BASE}/api/docs/${id}`, { method: 'DELETE', headers: authHeader(token) });
+  await fetchWithTimeout(`${API_BASE}/api/docs/${id}`, { method: 'DELETE', headers: authHeader(token) });
 }
 
 export async function getDocumentDownloadUrl(
   id: string,
   token: string
 ): Promise<{ downloadUrl: string; filename: string; expiresIn?: number }> {
-  const res = await fetch(`${API_BASE}/api/docs/${id}/download`, { headers: authHeader(token) });
+  const res = await fetchWithTimeout(`${API_BASE}/api/docs/${id}/download`, { headers: authHeader(token) });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || 'Download failed');
@@ -152,7 +171,7 @@ export interface Report {
 }
 
 export async function saveReport(data: Partial<Report> & { name: string; result: AgentResult }, token: string): Promise<Report> {
-  const res = await fetch(`${API_BASE}/api/reports`, {
+  const res = await fetchWithTimeout(`${API_BASE}/api/reports`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeader(token) },
     body: JSON.stringify(data),
   });
@@ -161,13 +180,13 @@ export async function saveReport(data: Partial<Report> & { name: string; result:
 }
 
 export async function listReports(token: string): Promise<Report[]> {
-  const res = await fetch(`${API_BASE}/api/reports`, { headers: authHeader(token) });
+  const res = await fetchWithTimeout(`${API_BASE}/api/reports`, { headers: authHeader(token) });
   if (!res.ok) return [];
   return (await res.json()).reports;
 }
 
 export async function deleteReport(id: string, token: string): Promise<void> {
-  await fetch(`${API_BASE}/api/reports/${id}`, { method: 'DELETE', headers: authHeader(token) });
+  await fetchWithTimeout(`${API_BASE}/api/reports/${id}`, { method: 'DELETE', headers: authHeader(token) });
 }
 
 export async function scheduleReport(
@@ -175,7 +194,7 @@ export async function scheduleReport(
   { cron, emails, format }: { cron: string; emails: string[]; format: string },
   token: string
 ) {
-  const res = await fetch(`${API_BASE}/api/reports/${reportId}/schedule`, {
+  const res = await fetchWithTimeout(`${API_BASE}/api/reports/${reportId}/schedule`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeader(token) },
     body: JSON.stringify({ cron, emails, format }),
@@ -187,20 +206,20 @@ export async function scheduleReport(
 // ── History + Schema ──────────────────────────────────────────────────────────
 
 export async function fetchHistory(token?: string | null) {
-  const res = await fetch(`${API_BASE}/api/history?limit=30`, { headers: authHeader(token) });
+  const res = await fetchWithTimeout(`${API_BASE}/api/history?limit=30`, { headers: authHeader(token) });
   if (!res.ok) return [];
   return (await res.json()).history;
 }
 
 export async function fetchSuggestions(): Promise<string[]> {
   try {
-    const res = await fetch(`${API_BASE}/api/suggestions`);
+    const res = await fetchWithTimeout(`${API_BASE}/api/suggestions`);
     return (await res.json()).suggestions || [];
   } catch { return []; }
 }
 
 export async function fetchSchema(token?: string | null) {
-  const res = await fetch(`${API_BASE}/api/schema`, { headers: authHeader(token) });
+  const res = await fetchWithTimeout(`${API_BASE}/api/schema`, { headers: authHeader(token) });
   if (!res.ok) {
     if (res.status === 401 || res.status === 403) {
       const data = await res.json().catch(() => ({}));
@@ -213,7 +232,7 @@ export async function fetchSchema(token?: string | null) {
 
 export async function checkHealth() {
   try {
-    const res = await fetch(`${API_BASE}/api/health`);
+    const res = await fetchWithTimeout(`${API_BASE}/api/health`);
     return res.json();
   } catch { return { status: 'error', database: 'disconnected' }; }
 }

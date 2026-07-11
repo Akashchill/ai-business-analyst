@@ -8,6 +8,10 @@ import { optionalAuth, requireQueryAccess } from '../middleware/auth.js';
 
 const router = express.Router();
 
+/** Simple in-memory schema cache (mirrors orchestrator TTL). */
+const schemaCache = { data: null, ts: 0, dbType: null };
+const SCHEMA_TTL_MS = 5 * 60_000;
+
 const MAX_QUESTION_LENGTH = 2000;
 const MAX_HISTORY_ITEMS = 20;
 const MAX_HISTORY_MESSAGE_LENGTH = 4000;
@@ -69,7 +73,22 @@ router.post('/agent/query', requireQueryAccess, async (req, res) => {
 // GET /api/schema
 router.get('/schema', requireQueryAccess, async (req, res) => {
   try {
-    const schema = await getDatabaseSchema(req.query.dbType || 'postgresql');
+    const dbType = req.query.dbType || 'postgresql';
+    if (
+      schemaCache.data &&
+      schemaCache.dbType === dbType &&
+      Date.now() - schemaCache.ts < SCHEMA_TTL_MS
+    ) {
+      return res.json({
+        schema: schemaCache.data,
+        tableCount: Object.keys(schemaCache.data).length,
+        cached: true,
+      });
+    }
+    const schema = await getDatabaseSchema(dbType);
+    schemaCache.data = schema;
+    schemaCache.ts = Date.now();
+    schemaCache.dbType = dbType;
     res.json({ schema, tableCount: Object.keys(schema).length });
   } catch (err) {
     res.status(500).json({ error: 'Schema fetch failed: ' + err.message });
@@ -89,7 +108,7 @@ router.delete('/history', optionalAuth, (req, res) => {
   res.json({ success: true });
 });
 
-// GET /api/suggestions
+// GET /api/suggestions — returns instantly (static/cache); AI refresh is background-only
 router.get('/suggestions', async (req, res) => {
   try {
     const suggestions = await getSuggestedQuestions();

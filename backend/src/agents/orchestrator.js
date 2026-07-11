@@ -13,7 +13,7 @@ import { sanitizeInsight } from '../utils/outputGuard.js';
 import { buildInsightFromData, shouldUseLlmInsight, isAiQuotaError } from '../utils/insightBuilder.js';
 import { pickChartByRules } from '../utils/chartRules.js';
 
-const SQL_MAX_RETRIES = 3;
+const SQL_MAX_RETRIES = 1;
 
 const INTENTS = ['greeting', 'analytics_sql', 'company_documents', 'general_business', 'out_of_scope'];
 
@@ -381,8 +381,14 @@ async function runSqlWithGuard(question, schema, plan, conversationHistory, dbTy
       sqlResult = await executeQuery(sqlMeta.sql, [], dbType);
       sqlMeta.error = undefined;
 
-      const emptyButExpected = expectsSqlRows(plan) && (!sqlResult.rows || sqlResult.rows.length === 0);
-      if (emptyButExpected && attempt < SQL_MAX_RETRIES) {
+      // Valid SQL + 0 rows: do not retry when schema has tables — empty data
+      // is usually migrations/seed, not something more LLM attempts will fix.
+      const empty = !sqlResult.rows || sqlResult.rows.length === 0;
+      const hasTables = schema && Object.keys(schema).length > 0;
+      if (empty && expectsSqlRows(plan) && hasTables) {
+        break;
+      }
+      if (empty && expectsSqlRows(plan) && attempt < SQL_MAX_RETRIES) {
         sqlMeta.error = 'Query returned 0 rows but the question expects data. Check filters, date ranges, joins, and table/column names.';
         priorAttempt = { sql: sqlMeta.sql, error: sqlMeta.error, schema };
         sqlResult = null;
@@ -476,6 +482,22 @@ Column roles could not be determined by rules alone. Choose the best chart type 
 // ── 5. Insight Agent ──────────────────────────────────────────────────────────
 
 async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult }) {
+  const hasSqlRows = Boolean(sqlResult?.rows?.length);
+  const hasRag = Boolean(ragResult?.answer && !ragResult.noContext);
+
+  // Empty SQL result: never call the insight LLM (~3s saved)
+  if (sqlMeta?.sql && !hasSqlRows && !hasRag) {
+    return sanitizeInsight({
+      summary: 'The query ran successfully but returned no rows. Check that migrations have been applied and seed data exists for the tables involved.',
+      keyFindings: [`SQL attempted: ${sqlMeta.sql}`],
+      recommendations: [
+        'Verify analytics tables are migrated and seeded',
+        'Try broadening filters or rephrasing the question',
+      ],
+      severity: 'neutral',
+    });
+  }
+
   const deterministic = buildInsightFromData({ question, sqlResult, ragResult });
   const useLlm = shouldUseLlmInsight(sqlResult);
 
@@ -483,7 +505,7 @@ async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult }) {
     return sanitizeInsight(deterministic);
   }
 
-  if (sqlMeta?.error && !sqlResult?.rows?.length) {
+  if (sqlMeta?.error && !hasSqlRows) {
     return sanitizeInsight({
       summary: `The database query could not be completed: ${sqlMeta.error}`,
       keyFindings: sqlMeta.sql ? [`SQL attempted: ${sqlMeta.sql}`] : [],
@@ -493,8 +515,9 @@ async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult }) {
   }
 
   const parts = buildInsightPromptParts({ sqlResult, sqlMeta, ragResult });
+  const hasDataParts = hasSqlRows || hasRag;
 
-  if (useLlm && parts.length) {
+  if (useLlm && hasDataParts && parts.length) {
     try {
       return await generateLlmInsight({ question, plan, parts });
     } catch (err) {
@@ -529,26 +552,12 @@ async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult }) {
     return sanitizeInsight(deterministic);
   }
 
-  if (!parts.length) {
-    return sanitizeInsight({
-      summary: 'No data available for this question. Try rephrasing or check that analytics tables are seeded and documents are uploaded.',
-      keyFindings: [],
-      recommendations: [],
-      severity: 'neutral',
-    });
-  }
-
-  try {
-    return await generateLlmInsight({ question, plan, parts });
-  } catch (err) {
-    console.warn('Insight generateObject failed:', err.message);
-    return sanitizeInsight({
-      summary: 'Unable to generate insights at this time.',
-      keyFindings: [],
-      recommendations: [],
-      severity: 'neutral',
-    });
-  }
+  return sanitizeInsight({
+    summary: 'No data available for this question. Try rephrasing or check that analytics tables are seeded and documents are uploaded.',
+    keyFindings: sqlMeta?.sql ? [`SQL attempted: ${sqlMeta.sql}`] : [],
+    recommendations: [],
+    severity: 'neutral',
+  });
 }
 
 // ── Orchestrator ──────────────────────────────────────────────────────────────
