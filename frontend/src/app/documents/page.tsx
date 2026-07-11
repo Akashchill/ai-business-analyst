@@ -99,7 +99,7 @@ export default function DocumentsPage() {
               dragOver ? 'border-indigo-500 bg-indigo-500/10' : 'border-slate-700 hover:border-slate-600 bg-slate-900/50'
             }`}
           >
-            <input ref={fileRef} type="file" accept=".pdf,.txt,.md" className="hidden"
+            <input ref={fileRef} type="file" accept=".pdf,.txt,.md,.doc,.docx,.xls,.xlsx" className="hidden"
               onChange={e => { const f = e.target.files?.[0]; if(f) handleUpload(f); }} />
             {uploading ? (
               <div className="flex flex-col items-center gap-2">
@@ -110,7 +110,7 @@ export default function DocumentsPage() {
               <>
                 <Upload size={32} className="mx-auto mb-3 text-slate-500" />
                 <p className="text-white font-medium">Drop a file here or click to upload</p>
-                <p className="text-sm text-slate-500 mt-1">PDF, TXT, MD — up to 20MB</p>
+                <p className="text-sm text-slate-500 mt-1">PDF, TXT, MD, Word, Excel — up to 20MB</p>
                 <div className="mt-4 flex items-center justify-center gap-3">
                   <select value={docType} onChange={e => setDocType(e.target.value)}
                     onClick={e => e.stopPropagation()}

@@ -605,7 +605,7 @@ export async function runAgentPipeline(question, options = {}) {
       question,
       intent,
       responseMode: 'declined',
-      message: `No company documents are uploaded yet. Go to the Documents page to upload PDFs or text files, then ask questions about their content.`,
+      message: `No company documents are uploaded yet. Go to the Documents page to upload PDFs, Word, Excel, or text files, then ask questions about their content.`,
       steps,
       startTime,
     });

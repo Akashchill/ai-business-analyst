@@ -2,7 +2,7 @@
  * RAG (Retrieval-Augmented Generation) Document Service — v2
  *
  * Real vector pipeline:
- *   1. Extract text from uploaded file (PDF/TXT/MD)
+ *   1. Extract text from uploaded file (PDF/TXT/MD/Word/Excel)
  *   2. Chunk into overlapping segments
  *   3. Embed each chunk with Gemini (gemini-embedding-001, 1536 dims)
  *   4. Store chunk text + vector in PostgreSQL (pgvector column)
@@ -13,6 +13,7 @@
  */
 
 import fs from 'fs';
+import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { getPostgresPool } from '../config/database.js';
 import { embedText, embedBatch, toVectorLiteral } from '../config/ai.js';
@@ -20,16 +21,59 @@ import * as s3Service from './s3Service.js';
 
 // ── Text extraction ──────────────────────────────────────────────────────────
 
-export async function extractText(filePath, mimetype) {
-  if (mimetype === 'application/pdf') {
+function fileExt(filePath, filename) {
+  return path.extname(filename || filePath).toLowerCase();
+}
+
+export async function extractText(filePath, mimetype, filename = '') {
+  const ext = fileExt(filePath, filename);
+
+  if (mimetype === 'application/pdf' || ext === '.pdf') {
     const { default: pdfParse } = await import('pdf-parse/lib/pdf-parse.js');
     const buf = fs.readFileSync(filePath);
     const data = await pdfParse(buf);
     return data.text;
   }
-  if (mimetype === 'text/plain' || filePath.endsWith('.txt') || filePath.endsWith('.md')) {
+
+  if (
+    mimetype === 'text/plain' || mimetype === 'text/markdown'
+    || ext === '.txt' || ext === '.md'
+  ) {
     return fs.readFileSync(filePath, 'utf-8');
   }
+
+  if (
+    ext === '.docx'
+    || mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  ) {
+    const mammothMod = await import('mammoth');
+    const mammoth = mammothMod.default ?? mammothMod;
+    const result = await mammoth.extractRawText({ path: filePath });
+    return result.value;
+  }
+
+  if (ext === '.doc' || mimetype === 'application/msword') {
+    const { default: WordExtractor } = await import('word-extractor');
+    const doc = await new WordExtractor().extract(filePath);
+    return [doc.getBody(), doc.getFootnotes(), doc.getEndnotes(), doc.getHeaders(), doc.getFooters()]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  if (
+    ['.xlsx', '.xls', '.xlsm'].includes(ext)
+    || mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    || mimetype === 'application/vnd.ms-excel'
+  ) {
+    const xlsxMod = await import('xlsx');
+    const XLSX = xlsxMod.default ?? xlsxMod;
+    const workbook = XLSX.readFile(filePath);
+    return workbook.SheetNames.map((name) => {
+      const sheet = workbook.Sheets[name];
+      return `Sheet: ${name}\n${XLSX.utils.sheet_to_csv(sheet, { blankrows: false })}`;
+    }).join('\n\n');
+  }
+
   try { return fs.readFileSync(filePath, 'utf-8'); } catch { return ''; }
 }
 
@@ -57,7 +101,7 @@ export async function ingestDocument({
   id: docIdOverride, s3Bucket = null, s3Key = null, fileSizeBytes = null,
 }) {
   const pool = getPostgresPool();
-  const text = await extractText(filePath, mimetype);
+  const text = await extractText(filePath, mimetype, filename);
   if (!text?.trim()) throw new Error('Could not extract text from document');
 
   const textChunks = chunkText(text);

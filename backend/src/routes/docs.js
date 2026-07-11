@@ -27,12 +27,22 @@ const upload = multer({
   storage,
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
   fileFilter: (req, file, cb) => {
-    const allowed = ['application/pdf', 'text/plain', 'text/markdown', 'application/octet-stream'];
+    const allowedMimes = [
+      'application/pdf',
+      'text/plain',
+      'text/markdown',
+      'application/octet-stream',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ];
+    const allowedExts = ['.pdf', '.txt', '.md', '.doc', '.docx', '.xls', '.xlsx'];
     const ext = path.extname(file.originalname).toLowerCase();
-    if (allowed.includes(file.mimetype) || ['.pdf', '.txt', '.md'].includes(ext)) {
+    if (allowedMimes.includes(file.mimetype) || allowedExts.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('Only PDF, TXT, and MD files are allowed'));
+      cb(new Error('Only PDF, TXT, MD, Word (.doc/.docx), and Excel (.xls/.xlsx) files are allowed'));
     }
   },
 });
