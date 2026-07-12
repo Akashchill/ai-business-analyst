@@ -220,3 +220,83 @@ Documents uploaded before S3 was enabled have no `s3_key` and return **404 — O
 - Use a **read-only DB user** for analytics queries in production (see `.env.example`); RAG/pgvector storage may need separate write grants
 - Rate limiting: 30 queries/min (query), 10/min (auth)
 - File size limit: 20MB per document upload
+
+---
+
+## 🐳 Docker deployment
+
+Images are built on every push to `main` and published to [GitHub Container Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) (GHCR).
+
+| Image | GHCR path |
+|---|---|
+| Backend | `ghcr.io/<owner>/<repo>/backend:latest` |
+| Frontend | `ghcr.io/<owner>/<repo>/frontend:latest` |
+
+Replace `<owner>/<repo>` with your GitHub repository (e.g. `ghcr.io/myorg/ai/backend:latest`).
+
+### Pull and run
+
+**Do not bake secrets into images.** Pass configuration at runtime with environment variables or a secrets manager. Never `COPY .env` into a Dockerfile or commit `.env` to git.
+
+```bash
+# Log in to GHCR (use a PAT with read:packages if the repo is private)
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u USERNAME --password-stdin
+
+docker pull ghcr.io/<owner>/<repo>/backend:latest
+docker pull ghcr.io/<owner>/<repo>/frontend:latest
+
+# Backend — mount env file or pass -e flags (example uses env file on the host only)
+docker run -d --name ai-backend -p 3001:3001 \
+  --env-file backend/.env \
+  ghcr.io/<owner>/<repo>/backend:latest
+
+# Frontend — NEXT_PUBLIC_API_URL is baked in at image build time (see build-arg below)
+docker run -d --name ai-frontend -p 3000:3000 \
+  ghcr.io/<owner>/<repo>/frontend:latest
+```
+
+When both containers share a Docker network, point the frontend rewrite target at the backend service name, e.g. `NEXT_PUBLIC_API_URL=http://ai-backend:3001` (set as a **build-arg** when building the frontend image).
+
+### Required runtime environment (backend)
+
+| Variable | Purpose |
+|---|---|
+| `PORT` | HTTP port (default `3001`) |
+| `FRONTEND_URL` | CORS origin for the UI (e.g. `https://analytics.example.com`) |
+| `GEMINI_API_KEY` | AI provider key (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` per `AI_PROVIDER`) |
+| `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | PostgreSQL (required for RAG + analytics) |
+| `JWT_SECRET` | Auth signing secret (use a strong value in production) |
+| `S3_*`, `AWS_*` | Optional document storage (see [Document storage](#-document-storage-s3)) |
+| `SMTP_*` | Optional scheduled email reports |
+
+See `backend/.env.example` for the full list. Copy it to `backend/.env` locally only — **never commit `.env`**.
+
+### Frontend build-time variable
+
+| Variable | Purpose |
+|---|---|
+| `NEXT_PUBLIC_API_URL` | Backend URL used by Next.js `/api` rewrites (default `http://localhost:3001`) |
+
+In GitHub Actions, set repository variable `NEXT_PUBLIC_API_URL` to your production API URL before builds, or rely on the workflow default for local/dev images.
+
+### Build locally
+
+```bash
+docker build -t ai-analytics-backend ./backend
+docker build --build-arg NEXT_PUBLIC_API_URL=http://localhost:3001 -t ai-analytics-frontend ./frontend
+```
+
+### CI workflow
+
+`.github/workflows/docker-publish.yml` builds and pushes both images to GHCR using `GITHUB_TOKEN`. No registry secrets are required for public packages on the same repo. For private repos, grant `packages: write` (already in the workflow) and use `read:packages` when pulling.
+
+### Migrations
+
+Run database migrations before or after starting the backend container:
+
+```bash
+docker run --rm --env-file backend/.env \
+  --entrypoint node \
+  ghcr.io/<owner>/<repo>/backend:latest \
+  scripts/migrate.js
+```
