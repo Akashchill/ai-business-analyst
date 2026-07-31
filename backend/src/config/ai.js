@@ -10,7 +10,7 @@
  *   AI_EMBED_MODEL=gemini-embedding-001
  *   AI_EMBED_DIMENSIONS=1536      # pgvector HNSW max is 2000
  */
-import { generateText, generateObject, embed, embedMany } from 'ai';
+import { generateText, generateObject, streamText, streamObject, embed, embedMany } from 'ai';
 import { createGoogle } from '@ai-sdk/google';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
@@ -101,6 +101,47 @@ export async function generateAgentText({ system, prompt, messages, maxOutputTok
   });
 
   return text;
+}
+
+/** Stream plain-text tokens; optional onChunk called for each delta. */
+export async function streamAgentText({ system, prompt, messages, maxOutputTokens = 1024, onChunk }) {
+  assertAiConfigured();
+
+  const result = streamText({
+    model: getChatModel(),
+    system,
+    ...(messages ? { messages } : { prompt }),
+    maxOutputTokens,
+  });
+
+  let text = '';
+  for await (const chunk of result.textStream) {
+    text += chunk;
+    if (onChunk) onChunk(chunk);
+  }
+  return text;
+}
+
+/** Stream structured JSON; onPartial called with each partial object update. */
+export async function streamAgentObject({ system, prompt, messages, schema, maxOutputTokens = 1024, onPartial }) {
+  assertAiConfigured();
+
+  const result = streamObject({
+    model: getChatModel(),
+    schema,
+    system,
+    ...(messages ? { messages } : { prompt }),
+    maxOutputTokens,
+  });
+
+  if (onPartial) {
+    for await (const partial of result.partialObjectStream) {
+      onPartial(partial);
+    }
+  }
+
+  const { object } = await result;
+  return object;
 }
 
 /** Structured JSON via AI SDK generateObject + Zod schema. */

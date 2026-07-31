@@ -115,6 +115,92 @@ export async function agentQuery(
   return handleResponse<AgentResult>(res);
 }
 
+export type AgentStreamEvent =
+  | { event: 'step'; data: { steps: AgentStep[] } }
+  | { event: 'partial'; data: AgentResult }
+  | { event: 'token'; data: { text: string; field?: 'rag' } }
+  | { event: 'done'; data: AgentResult }
+  | { event: 'error'; data: { error: string } };
+
+function parseSseChunk(buffer: string): { events: AgentStreamEvent[]; rest: string } {
+  const events: AgentStreamEvent[] = [];
+  const parts = buffer.split('\n\n');
+  const rest = parts.pop() ?? '';
+
+  for (const part of parts) {
+    if (!part.trim()) continue;
+    let event = 'message';
+    let data = '';
+    for (const line of part.split('\n')) {
+      if (line.startsWith('event: ')) event = line.slice(7).trim();
+      else if (line.startsWith('data: ')) data += line.slice(6);
+    }
+    if (!data) continue;
+    try {
+      events.push({ event, data: JSON.parse(data) } as AgentStreamEvent);
+    } catch {
+      // skip malformed chunk
+    }
+  }
+
+  return { events, rest };
+}
+
+/** Stream agent pipeline via SSE — calls onEvent for each update, returns final result. */
+export async function agentQueryStream(
+  question: string,
+  token: string | null | undefined,
+  history: { role: string; content: string }[] = [],
+  onEvent: (event: AgentStreamEvent) => void,
+  dbType = 'postgresql',
+): Promise<AgentResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120_000);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/agent/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeader(token) },
+      body: JSON.stringify({ question, history, dbType, stream: true }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401) throw new AuthError(data.error || 'Please sign in to continue', 401);
+      if (res.status === 403) throw new AuthError(data.error || 'You do not have permission for this action', 403);
+      throw new Error(data.error || 'Request failed');
+    }
+
+    if (!res.body) throw new Error('Streaming not supported');
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalResult: AgentResult | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const parsed = parseSseChunk(buffer);
+      buffer = parsed.rest;
+
+      for (const evt of parsed.events) {
+        onEvent(evt);
+        if (evt.event === 'done') finalResult = evt.data;
+        if (evt.event === 'error') throw new Error(evt.data.error || 'Stream failed');
+      }
+    }
+
+    if (!finalResult) throw new Error('Stream ended without a result');
+    return finalResult;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── Documents ─────────────────────────────────────────────────────────────────
 
 export interface Document {

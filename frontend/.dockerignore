@@ -1,0 +1,25 @@
+node_modules
+.next
+out
+build
+dist
+
+# Secrets — never copy into images
+.env
+.env.*
+!.env.example
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+.git
+.gitignore
+.dockerignore
+Dockerfile
+README.md
+
+coverage
+.nyc_output
+*.log
+*.tsbuildinfo

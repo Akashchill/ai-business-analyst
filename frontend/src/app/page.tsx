@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Send, BarChart3, RefreshCw, PanelLeftClose, PanelLeftOpen, LogIn } from 'lucide-react';
 import MessageBubble from '@/components/chat/MessageBubble';
 import { useAuth } from '@/hooks/useAuth';
-import { agentQuery, fetchSuggestions, AgentResult, AuthError } from '@/lib/api';
+import { agentQueryStream, fetchSuggestions, AgentResult, AuthError } from '@/lib/api';
 
 const Sidebar = dynamic(() => import('@/components/layout/Sidebar'), {
   ssr: false,
@@ -20,6 +20,25 @@ interface Message {
   content?: string;
   result?: AgentResult;
   loading?: boolean;
+  streaming?: boolean;
+}
+
+function emptyStreamingResult(question: string): AgentResult {
+  return {
+    success: true,
+    question,
+    sql: null,
+    sqlExplanation: null,
+    rows: [],
+    rowCount: 0,
+    duration: 0,
+    chartType: 'table',
+    ragAnswer: null,
+    ragSources: [],
+    steps: [],
+    totalDuration: 0,
+    insight: { summary: '', keyFindings: [], recommendations: [], severity: 'neutral' },
+  };
 }
 
 const STARTER_QUESTIONS = [
@@ -91,8 +110,56 @@ export default function HomePage() {
     historyRef.current = [...historyRef.current.slice(-8), { role: 'user', content: q }];
 
     try {
-      const result = await agentQuery(q, token, historyRef.current);
-      setMessages(prev => prev.map(m => m.id === aid ? { ...m, loading: false, result } : m));
+      const result = await agentQueryStream(q, token, historyRef.current, (evt) => {
+        setMessages(prev => prev.map(m => {
+          if (m.id !== aid) return m;
+
+          if (evt.event === 'step') {
+            const partial = m.result ?? emptyStreamingResult(q);
+            return {
+              ...m,
+              loading: true,
+              streaming: true,
+              result: { ...partial, steps: evt.data.steps },
+            };
+          }
+
+          if (evt.event === 'partial') {
+            return { ...m, loading: true, streaming: true, result: evt.data };
+          }
+
+          if (evt.event === 'token') {
+            const partial = m.result ?? emptyStreamingResult(q);
+            if (evt.data.field === 'rag') {
+              return {
+                ...m,
+                loading: true,
+                streaming: true,
+                result: {
+                  ...partial,
+                  ragAnswer: (partial.ragAnswer || '') + evt.data.text,
+                },
+              };
+            }
+            return {
+              ...m,
+              loading: true,
+              streaming: true,
+              result: {
+                ...partial,
+                insight: {
+                  ...partial.insight,
+                  summary: (partial.insight?.summary || '') + evt.data.text,
+                },
+              },
+            };
+          }
+
+          return m;
+        }));
+      });
+
+      setMessages(prev => prev.map(m => m.id === aid ? { ...m, loading: false, streaming: false, result } : m));
       historyRef.current = [...historyRef.current, { role: 'assistant', content: result.insight?.summary || '' }];
       setRefreshKey(k => k + 1);
     } catch (err: unknown) {
@@ -107,7 +174,7 @@ export default function HomePage() {
         insight: { summary: '', keyFindings: [], recommendations: [], severity: 'neutral' },
         error: err instanceof Error ? err.message : 'Something went wrong',
       };
-      setMessages(prev => prev.map(m => m.id === aid ? { ...m, loading: false, result: errResult } : m));
+      setMessages(prev => prev.map(m => m.id === aid ? { ...m, loading: false, streaming: false, result: errResult } : m));
     } finally {
       setIsLoading(false);
       inputRef.current?.focus();
@@ -180,7 +247,7 @@ export default function HomePage() {
           ) : (
             <>
               {messages.map(msg => (
-                <MessageBubble key={msg.id} role={msg.role} content={msg.content} result={msg.result} loading={msg.loading} />
+                <MessageBubble key={msg.id} role={msg.role} content={msg.content} result={msg.result} loading={msg.loading} streaming={msg.streaming} />
               ))}
               <div ref={bottomRef} />
             </>

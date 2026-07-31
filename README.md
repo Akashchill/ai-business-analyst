@@ -225,34 +225,131 @@ Documents uploaded before S3 was enabled have no `s3_key` and return **404 — O
 
 ## 🐳 Docker deployment
 
-Images are built on every push to `main` and published to [GitHub Container Registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) (GHCR).
+Images are built on every push to `main` and published to [Amazon ECR](https://aws.amazon.com/ecr/).
 
-| Image | GHCR path |
+| Image | ECR path |
 |---|---|
-| Backend | `ghcr.io/<owner>/<repo>/backend:latest` |
-| Frontend | `ghcr.io/<owner>/<repo>/frontend:latest` |
+| Backend | `121973526737.dkr.ecr.ap-south-1.amazonaws.com/business-analyst-backend:latest` |
+| Frontend | `121973526737.dkr.ecr.ap-south-1.amazonaws.com/business-analyst-frontend:latest` |
 
-Replace `<owner>/<repo>` with your GitHub repository (e.g. `ghcr.io/myorg/ai/backend:latest`).
+Repository prefix defaults to `business-analyst` (override with GitHub variable `ECR_REPOSITORY_PREFIX`).
+
+### GitHub Actions → ECR (OIDC)
+
+No long-lived AWS access keys. GitHub Actions assumes an IAM role via [OIDC](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services).
+
+#### 1. Create GitHub OIDC provider in AWS (once per account)
+
+IAM → **Identity providers** → **Add provider**
+
+| Field | Value |
+|---|---|
+| Provider type | OpenID Connect |
+| Provider URL | `https://token.actions.githubusercontent.com` |
+| Audience | `sts.amazonaws.com` |
+
+#### 2. Create IAM role for GitHub Actions
+
+IAM → **Roles** → **Create role** → **Web identity** → select the GitHub OIDC provider.
+
+**Trust policy** (replace `ACCOUNT_ID`, `OWNER`, `REPO`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:OWNER/REPO:ref:refs/heads/main"
+        }
+      }
+    }
+  ]
+}
+```
+
+To allow all branches: use `"repo:OWNER/REPO:*"` instead of the `ref:refs/heads/main` subject.
+
+**Permissions policy** (attach to the role — push only, no secrets in images):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+        "ecr:PutImage",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:DescribeRepositories",
+        "ecr:CreateRepository"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+#### 3. GitHub repo configuration
+
+The workflow assumes this IAM role via OIDC:
+
+```
+arn:aws:iam::121973526737:role/GitHubActionsECSDeployRole
+```
+
+Ensure the role **trust policy** allows this repository (see step 2) and that the role has the **ECR permissions** from step 2. The role name suggests ECS deploy — add ECR push permissions if they are not already attached.
+
+**Settings → Secrets and variables → Actions** (optional overrides):
+
+| Name | Type | Purpose |
+|---|---|---|
+| `AWS_REGION` | Variable | e.g. `ap-south-1` (default in workflow) |
+| `ECR_REPOSITORY_PREFIX` | Variable | Optional; default `business-analyst` |
+| `NEXT_PUBLIC_API_URL` | Variable | Optional; frontend build-time API URL |
+
+No `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` secrets are required.
+
+The workflow pushes to your existing ECR repos `business-analyst-backend` and `business-analyst-frontend` (creates them if missing).
 
 ### Pull and run
 
 **Do not bake secrets into images.** Pass configuration at runtime with environment variables or a secrets manager. Never `COPY .env` into a Dockerfile or commit `.env` to git.
 
 ```bash
-# Log in to GHCR (use a PAT with read:packages if the repo is private)
-echo "$GITHUB_TOKEN" | docker login ghcr.io -u USERNAME --password-stdin
+AWS_REGION=ap-south-1
+AWS_ACCOUNT_ID=123456789012
+ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
-docker pull ghcr.io/<owner>/<repo>/backend:latest
-docker pull ghcr.io/<owner>/<repo>/frontend:latest
+aws ecr get-login-password --region "$AWS_REGION" \
+  | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+docker pull "${ECR_REGISTRY}/business-analyst-backend:latest"
+docker pull "${ECR_REGISTRY}/business-analyst-frontend:latest"
 
 # Backend — mount env file or pass -e flags (example uses env file on the host only)
 docker run -d --name ai-backend -p 3001:3001 \
   --env-file backend/.env \
-  ghcr.io/<owner>/<repo>/backend:latest
+  "${ECR_REGISTRY}/business-analyst-backend:latest"
 
 # Frontend — NEXT_PUBLIC_API_URL is baked in at image build time (see build-arg below)
 docker run -d --name ai-frontend -p 3000:3000 \
-  ghcr.io/<owner>/<repo>/frontend:latest
+  "${ECR_REGISTRY}/business-analyst-frontend:latest"
 ```
 
 When both containers share a Docker network, point the frontend rewrite target at the backend service name, e.g. `NEXT_PUBLIC_API_URL=http://ai-backend:3001` (set as a **build-arg** when building the frontend image).
@@ -286,9 +383,17 @@ docker build -t ai-analytics-backend ./backend
 docker build --build-arg NEXT_PUBLIC_API_URL=http://localhost:3001 -t ai-analytics-frontend ./frontend
 ```
 
+Tag and push to ECR manually:
+
+```bash
+aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 123456789012.dkr.ecr.ap-south-1.amazonaws.com
+docker tag ai-analytics-backend:latest 121973526737.dkr.ecr.ap-south-1.amazonaws.com/business-analyst-backend:latest
+docker push 121973526737.dkr.ecr.ap-south-1.amazonaws.com/business-analyst-backend:latest
+```
+
 ### CI workflow
 
-`.github/workflows/docker-publish.yml` builds and pushes both images to GHCR using `GITHUB_TOKEN`. No registry secrets are required for public packages on the same repo. For private repos, grant `packages: write` (already in the workflow) and use `read:packages` when pulling.
+`.github/workflows/docker-publish.yml` uses GitHub OIDC to assume `GitHubActionsECSDeployRole`, logs in to ECR, builds both images, and pushes tags `latest` and the git SHA. No AWS access keys are stored in GitHub.
 
 ### Migrations
 
@@ -297,6 +402,6 @@ Run database migrations before or after starting the backend container:
 ```bash
 docker run --rm --env-file backend/.env \
   --entrypoint node \
-  ghcr.io/<owner>/<repo>/backend:latest \
+  "${ECR_REGISTRY}/business-analyst-backend:latest" \
   scripts/migrate.js
 ```

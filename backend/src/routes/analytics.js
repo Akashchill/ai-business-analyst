@@ -38,12 +38,54 @@ function validateQueryInput(body) {
   return null;
 }
 
-// POST /api/agent/query — full multi-agent pipeline
+function sendSse(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+// POST /api/agent/query — full multi-agent pipeline (JSON or SSE stream)
 router.post('/agent/query', requireQueryAccess, async (req, res) => {
   const inputError = validateQueryInput(req.body);
   if (inputError) return res.status(400).json(inputError);
 
-  const { question, sessionId = 'default', history = [], dbType = 'postgresql' } = req.body;
+  const { question, sessionId = 'default', history = [], dbType = 'postgresql', stream = false } = req.body;
+
+  if (stream) {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    try {
+      const result = await runAgentPipeline(question, {
+        sessionId,
+        conversationHistory: history,
+        dbType,
+        onEvent: (event, data) => sendSse(res, event, data),
+      });
+
+      const historyEntry = saveQuery({
+        sessionId: req.user?.id || sessionId,
+        userId: req.user?.id,
+        question,
+        sql: result.sql,
+        result: { rows: result.rows, rowCount: result.rowCount, duration: result.duration },
+        insight: result.insight?.summary || '',
+        chartType: result.chartType,
+      });
+
+      sendSse(res, 'done', {
+        ...result,
+        historyId: historyEntry.id,
+        timestamp: new Date().toISOString(),
+      });
+      return res.end();
+    } catch (err) {
+      console.error('Agent pipeline error:', err);
+      sendSse(res, 'error', { success: false, error: err.message });
+      return res.end();
+    }
+  }
 
   try {
     const result = await runAgentPipeline(question, {

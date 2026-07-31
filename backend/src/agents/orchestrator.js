@@ -4,7 +4,7 @@
  *   1. SQL / RAG pipeline (routed by intent)
  */
 
-import { generateAgentText, generateAgentObject } from '../config/ai.js';
+import { generateAgentText, generateAgentObject, streamAgentText, streamAgentObject } from '../config/ai.js';
 import { z } from 'zod';
 import { getDatabaseSchema, executeQuery } from '../config/database.js';
 import { retrieveRelevantChunks, getDocumentStats } from '../services/ragService.js';
@@ -90,6 +90,15 @@ function finishStep(steps, idx) {
   steps[idx] = { ...steps[idx], status: 'done', duration: Date.now() - steps[idx].startedAt };
 }
 
+function emitSteps(emit, steps) {
+  if (emit) emit('step', { steps: steps.map((s) => ({ ...s })) });
+}
+
+function pushRunningStep(steps, agent, emit) {
+  steps.push({ agent, status: 'running', startedAt: Date.now() });
+  emitSteps(emit, steps);
+}
+
 function safeJsonStringify(value) {
   return JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2);
 }
@@ -114,7 +123,7 @@ function buildInsightPromptParts({ sqlResult, sqlMeta, ragResult }) {
   return parts;
 }
 
-async function generateLlmInsight({ question, plan, parts }) {
+async function generateLlmInsight({ question, plan, parts, emit }) {
   const prompt = `You are a senior business analyst. Analyze this data and provide executive-level insights.
 
 Question: "${question}"
@@ -129,6 +138,23 @@ Rules:
 - Do not invent, estimate, or extrapolate figures not in the provided data
 - If data is insufficient to answer, say so clearly in the summary
 - Keep recommendations grounded in the evidence provided`;
+
+  if (emit) {
+    let lastSummary = '';
+    const insight = await streamAgentObject({
+      prompt,
+      schema: insightSchema,
+      maxOutputTokens: 700,
+      onPartial: (partial) => {
+        if (partial?.summary && typeof partial.summary === 'string') {
+          const delta = partial.summary.slice(lastSummary.length);
+          if (delta) emit('token', { text: delta });
+          lastSummary = partial.summary;
+        }
+      },
+    });
+    return sanitizeInsight(insight);
+  }
 
   const insight = await generateAgentObject({ prompt, schema: insightSchema, maxOutputTokens: 700 });
   return sanitizeInsight(insight);
@@ -194,7 +220,7 @@ Intents (pick exactly one):
 
 // ── Direct LLM response (greeting / general_business) ─────────────────────────
 
-async function directChatAgent(question, intent, conversationHistory = []) {
+async function directChatAgent(question, intent, conversationHistory = [], emit) {
   const system = intent === 'greeting'
     ? `You are a friendly AI Business Analytics assistant. Respond warmly and briefly. Mention you can answer database analytics questions or search uploaded company documents. Keep it to 2-4 sentences.`
     : `You are a knowledgeable business advisor. Answer the question clearly and concisely. You do not have live database or document access for this reply — if they need numbers from their data, suggest asking an analytics question.`;
@@ -203,6 +229,15 @@ async function directChatAgent(question, intent, conversationHistory = []) {
     ...conversationHistory.slice(-6).map(h => ({ role: h.role, content: h.content })),
     { role: 'user', content: question },
   ];
+
+  if (emit) {
+    return streamAgentText({
+      system,
+      messages,
+      maxOutputTokens: 400,
+      onChunk: (text) => emit('token', { text }),
+    });
+  }
 
   return generateAgentText({ system, messages, maxOutputTokens: 400 });
 }
@@ -414,7 +449,7 @@ async function runSqlWithGuard(question, schema, plan, conversationHistory, dbTy
 
 const RAG_MIN_SIMILARITY = 0.55;
 
-async function ragAgent(question) {
+async function ragAgent(question, emit) {
   const chunks = await retrieveRelevantChunks(question, 5);
   const relevant = chunks.filter(c => c.similarity >= RAG_MIN_SIMILARITY);
   if (!relevant.length) return null;
@@ -434,7 +469,9 @@ Rules:
 - Cite source filenames inline (e.g. "According to [filename], ...") for every factual claim
 - Plain text, 3-5 sentences`;
 
-  const answer = await generateAgentText({ prompt, maxOutputTokens: 400 });
+  const answer = emit
+    ? await streamAgentText({ prompt, maxOutputTokens: 400, onChunk: (text) => emit('token', { text, field: 'rag' }) })
+    : await generateAgentText({ prompt, maxOutputTokens: 400 });
   const topSimilarity = relevant[0]?.similarity ?? 0;
 
   return {
@@ -481,7 +518,7 @@ Column roles could not be determined by rules alone. Choose the best chart type 
 
 // ── 5. Insight Agent ──────────────────────────────────────────────────────────
 
-async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult }) {
+async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult, emit }) {
   const hasSqlRows = Boolean(sqlResult?.rows?.length);
   const hasRag = Boolean(ragResult?.answer && !ragResult.noContext);
 
@@ -519,7 +556,7 @@ async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult }) {
 
   if (useLlm && hasDataParts && parts.length) {
     try {
-      return await generateLlmInsight({ question, plan, parts });
+      return await generateLlmInsight({ question, plan, parts, emit });
     } catch (err) {
       console.warn('Insight LLM failed, falling back to local:', err.message);
       if (deterministic) return sanitizeInsight(deterministic);
@@ -532,10 +569,16 @@ async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult }) {
         });
       }
       try {
-        const text = await generateAgentText({
-          prompt: `${parts.join('\n\n')}\n\nQuestion: "${question}"\nType: ${plan.questionType}\nFocus: ${plan.sqlReason || plan.docReason}\nRespond in plain text: a 2-3 sentence executive summary using only the numbers above.`,
-          maxOutputTokens: 500,
-        });
+        const text = emit
+          ? await streamAgentText({
+            prompt: `${parts.join('\n\n')}\n\nQuestion: "${question}"\nType: ${plan.questionType}\nFocus: ${plan.sqlReason || plan.docReason}\nRespond in plain text: a 2-3 sentence executive summary using only the numbers above.`,
+            maxOutputTokens: 500,
+            onChunk: (chunk) => emit('token', { text: chunk }),
+          })
+          : await generateAgentText({
+            prompt: `${parts.join('\n\n')}\n\nQuestion: "${question}"\nType: ${plan.questionType}\nFocus: ${plan.sqlReason || plan.docReason}\nRespond in plain text: a 2-3 sentence executive summary using only the numbers above.`,
+            maxOutputTokens: 500,
+          });
         return sanitizeInsight({
           summary: text.trim(),
           keyFindings: [],
@@ -563,7 +606,8 @@ async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult }) {
 // ── Orchestrator ──────────────────────────────────────────────────────────────
 
 export async function runAgentPipeline(question, options = {}) {
-  const { conversationHistory = [], dbType = 'postgresql' } = options;
+  const { conversationHistory = [], dbType = 'postgresql', onEvent } = options;
+  const emit = onEvent ? (type, data) => onEvent(type, data) : null;
   const steps = [];
   const startTime = Date.now();
 
@@ -576,16 +620,18 @@ export async function runAgentPipeline(question, options = {}) {
   const hasDocuments = docStats.documentCount > 0;
 
   // Step 0: Intent classification
-  steps.push({ agent: 'intent', status: 'running', startedAt: Date.now() });
+  pushRunningStep(steps, 'intent', emit);
   const classification = await intentClassifier(question, hasDocuments);
   finishStep(steps, 0);
+  emitSteps(emit, steps);
   const { intent } = classification;
 
   // Greeting / general business → direct LLM reply
   if (intent === 'greeting' || intent === 'general_business') {
-    steps.push({ agent: 'chat', status: 'running', startedAt: Date.now() });
-    const message = await directChatAgent(question, intent, conversationHistory);
+    pushRunningStep(steps, 'chat', emit);
+    const message = await directChatAgent(question, intent, conversationHistory, emit);
     finishStep(steps, 1);
+    emitSteps(emit, steps);
     return makeDirectResponse({
       question,
       intent,
@@ -621,9 +667,10 @@ export async function runAgentPipeline(question, options = {}) {
   }
 
   // Planner: routing + question metadata for downstream agents
-  steps.push({ agent: 'planner', status: 'running', startedAt: Date.now() });
+  pushRunningStep(steps, 'planner', emit);
   const plan = await plannerAgent(question, intent, hasDocuments);
   finishStep(steps, steps.length - 1);
+  emitSteps(emit, steps);
 
   let sqlResult = null;
   let sqlMeta = null;
@@ -638,21 +685,23 @@ export async function runAgentPipeline(question, options = {}) {
   if (plan.needsSQL) {
     tasks.push((async () => {
       const stepIdx = steps.length;
-      steps.push({ agent: 'sql', status: 'running', startedAt: Date.now() });
+      pushRunningStep(steps, 'sql', emit);
       const sqlRun = await runSqlWithGuard(question, schema, plan, conversationHistory, dbType);
       sqlMeta = sqlRun.sqlMeta;
       sqlResult = sqlRun.sqlResult;
       sqlRetries = sqlRun.sqlRetries;
       finishStep(steps, stepIdx);
+      emitSteps(emit, steps);
     })());
   }
 
   if (plan.needsDocuments && hasDocuments) {
     tasks.push((async () => {
       const stepIdx = steps.length;
-      steps.push({ agent: 'rag', status: 'running', startedAt: Date.now() });
-      ragResult = await ragAgent(question);
+      pushRunningStep(steps, 'rag', emit);
+      ragResult = await ragAgent(question, emit);
       finishStep(steps, stepIdx);
+      emitSteps(emit, steps);
     })());
   }
 
@@ -675,15 +724,47 @@ export async function runAgentPipeline(question, options = {}) {
 
   if (sqlResult?.rows?.length) {
     const stepIdx = steps.length;
-    steps.push({ agent: 'visualization', status: 'running', startedAt: Date.now() });
+    pushRunningStep(steps, 'visualization', emit);
     vizResult = await visualizationAgent(question, sqlResult.rows, plan);
     finishStep(steps, stepIdx);
+    emitSteps(emit, steps);
+  }
+
+  if (emit) {
+    emit('partial', {
+      question,
+      intent,
+      responseMode: 'analytics',
+      plan,
+      sql: sqlMeta?.sql || null,
+      sqlExplanation: sqlMeta?.explanation || null,
+      rows: sqlResult?.rows || [],
+      rowCount: sqlResult?.rowCount || 0,
+      fields: sqlResult?.fields || [],
+      duration: sqlResult?.duration || 0,
+      chartType: vizResult?.chartType || 'table',
+      chartConfig: vizResult?.chartConfig || null,
+      ragAnswer: ragResult?.answer || null,
+      ragSources: ragResult?.sources || [],
+      ragConfidence,
+      sqlRetries: sqlRetries || undefined,
+      insight: {
+        summary: '',
+        keyFindings: [],
+        recommendations: [],
+        severity: 'neutral',
+      },
+      steps: steps.map((s) => ({ ...s })),
+      totalDuration: Date.now() - startTime,
+      success: true,
+    });
   }
 
   const stepIdx = steps.length;
-  steps.push({ agent: 'insight', status: 'running', startedAt: Date.now() });
-  const insight = await insightAgent({ question, plan, sqlResult, sqlMeta, ragResult });
+  pushRunningStep(steps, 'insight', emit);
+  const insight = await insightAgent({ question, plan, sqlResult, sqlMeta, ragResult, emit });
   finishStep(steps, stepIdx);
+  emitSteps(emit, steps);
 
   return {
     question,

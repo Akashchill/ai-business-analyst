@@ -18,9 +18,10 @@ interface MessageProps {
   content?: string;
   result?: AgentResult;
   loading?: boolean;
+  streaming?: boolean;
 }
 
-export default function MessageBubble({ role, content, result, loading }: MessageProps) {
+export default function MessageBubble({ role, content, result, loading, streaming }: MessageProps) {
   const { token } = useAuth();
   const [showSQL, setShowSQL] = useState(false);
   const [showTable, setShowTable] = useState(false);
@@ -32,6 +33,87 @@ export default function MessageBubble({ role, content, result, loading }: Messag
       <div className="flex justify-end mb-4 animate-fade-in">
         <div className="max-w-xl bg-indigo-600 text-white rounded-2xl rounded-tr-sm px-4 py-3 text-sm leading-relaxed shadow-lg">
           {content}
+        </div>
+      </div>
+    );
+  }
+
+  if (loading && !result) {
+    return (
+      <div className="flex gap-3 mb-4 animate-fade-in">
+        <div className="w-8 h-8 rounded-full bg-indigo-900 border border-indigo-700 flex items-center justify-center flex-shrink-0 mt-1">
+          <span className="text-xs">🤖</span>
+        </div>
+        <div className="bg-slate-800 border border-slate-700 rounded-2xl rounded-tl-sm px-4 py-4">
+          <div className="flex gap-2 items-center mb-1">
+            <div className="flex gap-1">
+              <span className="typing-dot" /><span className="typing-dot" /><span className="typing-dot" />
+            </div>
+            <span className="text-xs text-slate-500 animate-pulse">Running agent pipeline…</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading && result && streaming) {
+    const runningStep = result.steps?.find(s => s.status === 'running');
+    const isDirectReply = result.responseMode === 'direct' || result.responseMode === 'declined';
+    const hasChart = result.success && !isDirectReply && result.rows.length > 0 && result.chartType !== 'table';
+    const hasTable = result.success && !isDirectReply && result.rows.length > 0;
+    const streamingSummary = result.insight?.summary;
+
+    return (
+      <div className="flex gap-3 mb-5 animate-slide-up">
+        <div className="w-8 h-8 rounded-full bg-indigo-900 border border-indigo-700 flex items-center justify-center flex-shrink-0 mt-1">
+          <span className="text-xs">🤖</span>
+        </div>
+        <div className="flex-1 min-w-0 space-y-2">
+          {runningStep && (
+            <div className="flex items-center gap-2 text-xs text-slate-500 px-1">
+              <div className="flex gap-1">
+                <span className="typing-dot" /><span className="typing-dot" /><span className="typing-dot" />
+              </div>
+              <span>Running {runningStep.agent} agent…</span>
+            </div>
+          )}
+
+          {hasChart && (
+            <div className="bg-slate-800/80 border border-slate-700 rounded-2xl overflow-hidden">
+              {result.chartConfig?.title && (
+                <div className="px-4 pt-3 pb-1">
+                  <p className="text-xs text-slate-400 font-medium">{result.chartConfig.title}</p>
+                </div>
+              )}
+              <div className="px-2 py-2">
+                <ChartRenderer type={result.chartType} rows={result.rows} config={result.chartConfig} />
+              </div>
+            </div>
+          )}
+
+          {!hasChart && hasTable && (
+            <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+              <ChartRenderer type="table" rows={result.rows} />
+            </div>
+          )}
+
+          {streamingSummary && (
+            <div className="bg-slate-800 border border-slate-700 rounded-xl px-4 py-3">
+              <p className="text-sm text-slate-300 leading-relaxed">
+                {streamingSummary}
+                <span className="inline-block w-1.5 h-4 ml-0.5 bg-indigo-400 animate-pulse align-middle" />
+              </p>
+            </div>
+          )}
+
+          {result.ragAnswer && (
+            <div className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl px-4 py-3">
+              <p className="text-sm text-slate-300 leading-relaxed">
+                {result.ragAnswer}
+                <span className="inline-block w-1.5 h-4 ml-0.5 bg-cyan-400 animate-pulse align-middle" />
+              </p>
+            </div>
+          )}
         </div>
       </div>
     );
