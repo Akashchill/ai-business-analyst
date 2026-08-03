@@ -45,7 +45,15 @@ class PostgresAdapter {
       ORDER BY t.table_name, c.ordinal_position`);
     return buildSchema(result.rows);
   }
-  async testConnection() { try { await this.query('SELECT 1'); return true; } catch { return false; } }
+  async testConnection() {
+    try {
+      await this.query('SELECT 1');
+      return true;
+    } catch (err) {
+      console.error('PostgreSQL connection failed:', err.message);
+      return false;
+    }
+  }
 }
 
 class MySQLAdapter {
@@ -96,6 +104,21 @@ function initAdapters() {
 }
 initAdapters();
 
+/** Safe startup log — no secrets. Helps debug ECS env configuration. */
+export function logDatabaseStatus() {
+  if (!process.env.DB_NAME) {
+    console.warn('⚠️  PostgreSQL not configured: DB_NAME env var is missing.');
+    console.warn('   ECS: add DB_HOST, DB_POOLER_HOST, DB_NAME, DB_USER, DB_PASSWORD to the task definition.');
+    return;
+  }
+  const cfg = getPgPoolConfig();
+  console.log(`🗄️  PostgreSQL: ${cfg.host}:${cfg.port}/${cfg.database} user=${cfg.user} ssl=${cfg.ssl ? 'on' : 'off'}`);
+}
+
+export function isPostgresConfigured() {
+  return adapters.has('postgresql');
+}
+
 export function getAdapter(dbType = 'postgresql') {
   const adapter = adapters.get(dbType);
   if (!adapter) throw new Error(`Database adapter "${dbType}" not configured`);
@@ -109,7 +132,18 @@ export async function getHealthAll() {
 }
 export async function executeQuery(sql, params, dbType) { return getAdapter(dbType).query(sql, params); }
 export async function getDatabaseSchema(dbType) { return getAdapter(dbType).getSchema(); }
-export async function testConnection(dbType) { try { return await getAdapter(dbType).testConnection(); } catch { return false; } }
+export async function testConnection(dbType) {
+  try {
+    if (!adapters.has(dbType)) {
+      console.error(`DB connection test failed: "${dbType}" adapter not configured (check DB_NAME env var).`);
+      return false;
+    }
+    return await getAdapter(dbType).testConnection();
+  } catch (err) {
+    console.error('DB connection test failed:', err.message);
+    return false;
+  }
+}
 
 /**
  * Raw PostgreSQL pool, for features that are Postgres-specific

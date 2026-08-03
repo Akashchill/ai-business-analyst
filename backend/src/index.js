@@ -14,6 +14,7 @@ import authRouter from './routes/auth.js';
 import docsRouter from './routes/docs.js';
 import reportsRouter from './routes/reports.js';
 import { prewarmSuggestionCache } from './services/aiService.js';
+import { logDatabaseStatus } from './config/database.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -56,6 +57,7 @@ app.listen(PORT, () => {
   console.log(`📊 Health:  GET /api/health`);
   console.log(`🔐 Auth:    POST /api/auth/login`);
   console.log(`🤖 Query:   POST /api/agent/query\n`);
+  logDatabaseStatus();
   // Non-blocking: warm AI suggestions cache after startup
   setTimeout(() => prewarmSuggestionCache(), 2000);
 });
