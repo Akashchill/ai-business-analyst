@@ -1,3 +1,14 @@
+function shouldUseSsl(host) {
+  if (process.env.DB_SSL === 'false') return false;
+  if (process.env.DB_SSL === 'true') return true;
+  return /supabase\.co|pooler\.supabase\.com|rds\.amazonaws\.com/i.test(host || '');
+}
+
+function withOptionalSsl(config, host) {
+  if (!shouldUseSsl(host)) return config;
+  return { ...config, ssl: { rejectUnauthorized: false } };
+}
+
 /**
  * PostgreSQL connection config.
  * Supabase direct hosts (db.<ref>.supabase.co) are IPv6-only; Node on many
@@ -17,14 +28,14 @@ export function getPgPoolConfig() {
     const poolerHost = process.env.DB_POOLER_HOST;
 
     if (poolerHost) {
-      return {
+      return withOptionalSsl({
         host: poolerHost,
         port: parseInt(process.env.DB_POOLER_PORT || process.env.DB_PORT || '5432', 10),
         database,
         user: user?.includes('.') ? user : `postgres.${projectRef}`,
         password,
         max: 20,
-      };
+      }, poolerHost);
     }
 
     console.warn(`
@@ -36,5 +47,5 @@ export function getPgPoolConfig() {
 `);
   }
 
-  return { host, port, database, user, password, max: 20 };
+  return withOptionalSsl({ host, port, database, user, password, max: 20 }, host);
 }
