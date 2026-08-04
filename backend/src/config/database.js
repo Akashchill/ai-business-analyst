@@ -132,7 +132,7 @@ export async function getHealthAll() {
 }
 export async function executeQuery(sql, params, dbType) { return getAdapter(dbType).query(sql, params); }
 export async function getDatabaseSchema(dbType) { return getAdapter(dbType).getSchema(); }
-export async function testConnection(dbType) {
+export async function testConnection(dbType = 'postgresql') {
   try {
     if (!adapters.has(dbType)) {
       console.error(`DB connection test failed: "${dbType}" adapter not configured (check DB_NAME env var).`);
