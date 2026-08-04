@@ -52,12 +52,12 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`\n🚀 AI Analytics v2 running on http://localhost:${PORT}`);
   console.log(`📊 Health:  GET /api/health`);
   console.log(`🔐 Auth:    POST /api/auth/login`);
   console.log(`🤖 Query:   POST /api/agent/query\n`);
-  logDatabaseStatus();
+  await logDatabaseStatus();
   // Non-blocking: warm AI suggestions cache after startup
   setTimeout(() => prewarmSuggestionCache(), 2000);
 });

@@ -105,7 +105,7 @@ function initAdapters() {
 initAdapters();
 
 /** Safe startup log — no secrets. Helps debug ECS env configuration. */
-export function logDatabaseStatus() {
+export async function logDatabaseStatus() {
   if (!process.env.DB_NAME) {
     console.warn('⚠️  PostgreSQL not configured: DB_NAME env var is missing.');
     console.warn('   ECS: add DB_HOST, DB_POOLER_HOST, DB_NAME, DB_USER, DB_PASSWORD to the task definition.');
@@ -113,6 +113,8 @@ export function logDatabaseStatus() {
   }
   const cfg = getPgPoolConfig();
   console.log(`🗄️  PostgreSQL: ${cfg.host}:${cfg.port}/${cfg.database} user=${cfg.user} ssl=${cfg.ssl ? 'on' : 'off'}`);
+  const ok = await testConnection('postgresql');
+  console.log(ok ? '✅ PostgreSQL connection verified' : '❌ PostgreSQL connection failed at startup');
 }
 
 export function isPostgresConfigured() {
