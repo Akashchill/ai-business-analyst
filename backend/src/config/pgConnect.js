@@ -9,6 +9,21 @@ function withOptionalSsl(config, host) {
   return { ...config, ssl: { rejectUnauthorized: false } };
 }
 
+function getSupabaseProjectRef(host, user) {
+  const fromHost = host.match(/^db\.([a-z0-9]+)\.supabase\.co$/i)?.[1];
+  if (fromHost) return fromHost;
+  if (process.env.SUPABASE_PROJECT_REF) return process.env.SUPABASE_PROJECT_REF;
+  const fromUser = user?.match(/^postgres\.([a-z0-9]+)$/i)?.[1];
+  if (fromUser) return fromUser;
+  return null;
+}
+
+function poolerUser(user, projectRef) {
+  if (user?.includes('.')) return user;
+  if (projectRef) return `postgres.${projectRef}`;
+  return user;
+}
+
 /**
  * PostgreSQL connection config.
  * Supabase direct hosts (db.<ref>.supabase.co) are IPv6-only; Node on many
@@ -19,25 +34,25 @@ export function getPgPoolConfig() {
   const host = process.env.DB_HOST || 'localhost';
   const port = parseInt(process.env.DB_PORT || '5432', 10);
   const database = process.env.DB_NAME;
-  let user = process.env.DB_USER;
+  const user = process.env.DB_USER;
   const password = process.env.DB_PASSWORD;
+  const poolerHost = process.env.DB_POOLER_HOST;
+  const projectRef = getSupabaseProjectRef(host, user);
+
+  // Prefer pooler whenever DB_POOLER_HOST is set (ECS / IPv4 networks)
+  if (poolerHost) {
+    return withOptionalSsl({
+      host: poolerHost,
+      port: parseInt(process.env.DB_POOLER_PORT || process.env.DB_PORT || '5432', 10),
+      database,
+      user: poolerUser(user, projectRef),
+      password,
+      max: 20,
+    }, poolerHost);
+  }
 
   const supabaseDirect = host.match(/^db\.([a-z0-9]+)\.supabase\.co$/i);
   if (supabaseDirect) {
-    const projectRef = supabaseDirect[1];
-    const poolerHost = process.env.DB_POOLER_HOST;
-
-    if (poolerHost) {
-      return withOptionalSsl({
-        host: poolerHost,
-        port: parseInt(process.env.DB_POOLER_PORT || process.env.DB_PORT || '5432', 10),
-        database,
-        user: user?.includes('.') ? user : `postgres.${projectRef}`,
-        password,
-        max: 20,
-      }, poolerHost);
-    }
-
     console.warn(`
 ⚠️  DB_HOST is a Supabase direct connection (IPv6-only).
     If you see "getaddrinfo ENOTFOUND", switch to the Session pooler in Supabase Dashboard:
