@@ -1,6 +1,56 @@
+function env(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  // Trim — ECS console pastes / Secrets Manager values often include trailing newlines
+  return String(raw).trim();
+}
+
+/**
+ * Resolve DB password from env.
+ * ECS + Secrets Manager often injects a JSON secret as the whole string, e.g.
+ *   {"username":"postgres","password":"secret"}
+ * instead of the bare password (missing `:password::` JSON key in valueFrom).
+ */
+export function resolveDbPassword(raw) {
+  if (raw == null || raw === '') return raw;
+  let value = String(raw).trim();
+
+  // Strip one layer of wrapping quotes: "secret" or 'secret'
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1).trim();
+  }
+
+  if (value.startsWith('{') && value.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object') {
+        const fromJson =
+          parsed.password ??
+          parsed.DB_PASSWORD ??
+          parsed.db_password ??
+          parsed.Password;
+        if (typeof fromJson === 'string' && fromJson.length > 0) {
+          console.warn(
+            '⚠️  DB_PASSWORD looked like a Secrets Manager JSON object; extracted the password field. ' +
+              'Prefer ECS valueFrom with a JSON key, e.g. arn:...:secret:name:password::'
+          );
+          return fromJson.trim();
+        }
+      }
+    } catch {
+      // not JSON — use as-is
+    }
+  }
+
+  return value;
+}
+
 function shouldUseSsl(host) {
-  if (process.env.DB_SSL === 'false') return false;
-  if (process.env.DB_SSL === 'true') return true;
+  if (env('DB_SSL') === 'false') return false;
+  if (env('DB_SSL') === 'true') return true;
   return /supabase\.co|pooler\.supabase\.com|rds\.amazonaws\.com/i.test(host || '');
 }
 
@@ -12,7 +62,7 @@ function withOptionalSsl(config, host) {
 function getSupabaseProjectRef(host, user) {
   const fromHost = host.match(/^db\.([a-z0-9]+)\.supabase\.co$/i)?.[1];
   if (fromHost) return fromHost;
-  if (process.env.SUPABASE_PROJECT_REF) return process.env.SUPABASE_PROJECT_REF;
+  if (env('SUPABASE_PROJECT_REF')) return env('SUPABASE_PROJECT_REF');
   const fromUser = user?.match(/^postgres\.([a-z0-9]+)$/i)?.[1];
   if (fromUser) return fromUser;
   return null;
@@ -31,19 +81,19 @@ function poolerUser(user, projectRef) {
  * (IPv4) from Dashboard → Project Settings → Database → Connection string → Session.
  */
 export function getPgPoolConfig() {
-  const host = process.env.DB_HOST || 'localhost';
-  const port = parseInt(process.env.DB_PORT || '5432', 10);
-  const database = process.env.DB_NAME;
-  const user = process.env.DB_USER;
-  const password = process.env.DB_PASSWORD;
-  const poolerHost = process.env.DB_POOLER_HOST;
+  const host = env('DB_HOST', 'localhost');
+  const port = parseInt(env('DB_PORT', '5432'), 10);
+  const database = env('DB_NAME');
+  const user = env('DB_USER');
+  const password = resolveDbPassword(process.env.DB_PASSWORD);
+  const poolerHost = env('DB_POOLER_HOST');
   const projectRef = getSupabaseProjectRef(host, user);
 
   // Prefer pooler whenever DB_POOLER_HOST is set (ECS / IPv4 networks)
   if (poolerHost) {
     return withOptionalSsl({
       host: poolerHost,
-      port: parseInt(process.env.DB_POOLER_PORT || process.env.DB_PORT || '5432', 10),
+      port: parseInt(env('DB_POOLER_PORT', env('DB_PORT', '5432')), 10),
       database,
       user: poolerUser(user, projectRef),
       password,

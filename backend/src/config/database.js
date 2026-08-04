@@ -5,7 +5,7 @@
 import pg from 'pg';
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
-import { getPgPoolConfig } from './pgConnect.js';
+import { getPgPoolConfig, resolveDbPassword } from './pgConnect.js';
 dotenv.config();
 
 class PostgresAdapter {
@@ -51,6 +51,19 @@ class PostgresAdapter {
       return true;
     } catch (err) {
       console.error('PostgreSQL connection failed:', err.message);
+      if (/password authentication failed/i.test(err.message)) {
+        const raw = process.env.DB_PASSWORD ?? '';
+        const resolved = resolveDbPassword(raw) ?? '';
+        const looksJson = raw.trim().startsWith('{');
+        console.error(
+          `   → Auth rejected. DB_PASSWORD rawLen=${raw.length} resolvedLen=${resolved.length}` +
+            `${looksJson ? ' (value looks like JSON — check Secrets Manager / ECS valueFrom key)' : ''}`
+        );
+        console.error(
+          '   → Confirm the task definition Secrets entry for DB_PASSWORD uses ' +
+            'arn:...:secret:NAME:password:: (JSON key), not the whole secret ARN.'
+        );
+      }
       return false;
     }
   }
@@ -112,7 +125,17 @@ export async function logDatabaseStatus() {
     return;
   }
   const cfg = getPgPoolConfig();
-  console.log(`🗄️  PostgreSQL: ${cfg.host}:${cfg.port}/${cfg.database} user=${cfg.user} ssl=${cfg.ssl ? 'on' : 'off'}`);
+  const rawPw = process.env.DB_PASSWORD ?? '';
+  const pwLen = cfg.password?.length ?? 0;
+  const shape = rawPw.trim().startsWith('{')
+    ? 'json'
+    : rawPw.includes('"') || rawPw.includes("'")
+      ? 'quoted'
+      : 'plain';
+  console.log(
+    `🗄️  PostgreSQL: ${cfg.host}:${cfg.port}/${cfg.database} user=${cfg.user} ` +
+      `ssl=${cfg.ssl ? 'on' : 'off'} passwordLen=${pwLen} passwordShape=${shape}`
+  );
   const ok = await testConnection('postgresql');
   console.log(ok ? '✅ PostgreSQL connection verified' : '❌ PostgreSQL connection failed at startup');
 }
