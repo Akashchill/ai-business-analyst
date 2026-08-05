@@ -184,10 +184,17 @@ Original uploaded files (PDF, TXT, MD) can be stored in a **private AWS S3 bucke
 ```env
 S3_ENABLED=true
 AWS_REGION=ap-south-1
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
 S3_BUCKET_NAME=your-bucket-name
 S3_PREFIX=documents/
+```
+
+On **ECS**, do **not** set `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. The AWS SDK uses the **task IAM role** (short-lived credentials).
+
+For **local/dev** only, you may optionally set:
+
+```env
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
 ```
 
 Set `S3_ENABLED=false` to disable S3 — RAG ingestion still works, but originals cannot be downloaded.
@@ -196,7 +203,7 @@ Set `S3_ENABLED=false` to disable S3 — RAG ingestion still works, but original
 
 - The bucket must be **private** (no public ACL or bucket policy allowing anonymous reads).
 - Access is only via short-lived presigned URLs from `GET /api/docs/:id/download`.
-- IAM policy for the app user needs at minimum:
+- Attach an IAM policy to the **ECS task role** (or local IAM user) with at minimum:
   - `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` on `arn:aws:s3:::your-bucket-name/documents/*`
 
 ### Migration
@@ -279,7 +286,7 @@ IAM → **Roles** → **Create role** → **Web identity** → select the GitHub
 
 To allow all branches: use `"repo:OWNER/REPO:*"` instead of the `ref:refs/heads/main` subject.
 
-**Permissions policy** (attach to the role — push only, no secrets in images):
+**Permissions policy** (attach to the role — ECR push + ECS redeploy):
 
 ```json
 {
@@ -300,6 +307,16 @@ To allow all branches: use `"repo:OWNER/REPO:*"` instead of the `ref:refs/heads/
         "ecr:CreateRepository"
       ],
       "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecs:UpdateService"
+      ],
+      "Resource": [
+        "arn:aws:ecs:ap-south-1:121973526737:service/business-analyst/business-analyst-backend-service",
+        "arn:aws:ecs:ap-south-1:121973526737:service/business-analyst/business-analyst-frontend-service"
+      ]
     }
   ]
 }
@@ -363,7 +380,7 @@ When both containers share a Docker network, point the frontend rewrite target a
 | `GEMINI_API_KEY` | AI provider key (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` per `AI_PROVIDER`) |
 | `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | PostgreSQL (required for RAG + analytics) |
 | `JWT_SECRET` | Auth signing secret (use a strong value in production) |
-| `S3_*`, `AWS_*` | Optional document storage (see [Document storage](#-document-storage-s3)) |
+| `S3_ENABLED`, `S3_BUCKET_NAME`, `S3_PREFIX`, `AWS_REGION` | Optional S3 document storage (task role on ECS; no access keys needed) |
 | `SMTP_*` | Optional scheduled email reports |
 
 See `backend/.env.example` for the full list. Copy it to `backend/.env` locally only — **never commit `.env`**.
@@ -391,9 +408,18 @@ docker tag ai-analytics-backend:latest 121973526737.dkr.ecr.ap-south-1.amazonaws
 docker push 121973526737.dkr.ecr.ap-south-1.amazonaws.com/business-analyst-backend:latest
 ```
 
-### CI workflow
+### CI workflows
 
-`.github/workflows/docker-publish.yml` uses GitHub OIDC to assume `GitHubActionsECSDeployRole`, logs in to ECR, builds both images, and pushes tags `latest` and the git SHA. No AWS access keys are stored in GitHub.
+Two separate GitHub Actions workflows deploy independently:
+
+| Workflow | Triggers on | ECS service |
+|----------|-------------|-------------|
+| `docker-publish-backend.yml` | Changes in `backend/**` | `business-analyst-backend-service` |
+| `docker-publish-frontend.yml` | Changes in `frontend/**` | `business-analyst-frontend-service` |
+
+Each workflow builds and pushes its image to ECR, then runs `aws ecs update-service --force-new-deployment` for that service only. You can also trigger either workflow manually from the Actions tab (`workflow_dispatch`).
+
+If both `backend/` and `frontend/` change in one commit, **both** workflows run.
 
 ### Migrations
 

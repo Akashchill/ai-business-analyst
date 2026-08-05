@@ -2,7 +2,11 @@
  * AWS S3 storage for original uploaded documents.
  *
  * When S3_ENABLED=false, all functions no-op or return null (RAG works without S3).
- * When S3_ENABLED=true, credentials and bucket must be configured or operations throw.
+ * When S3_ENABLED=true, S3_BUCKET_NAME must be set.
+ *
+ * Credentials (in order):
+ *   1. AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY — optional, for local/dev
+ *   2. Default AWS SDK chain — ECS task role, instance profile, etc. (production)
  */
 
 import fs from 'fs';
@@ -23,20 +27,20 @@ function getConfig() {
     region: process.env.AWS_REGION || 'ap-south-1',
     bucket: process.env.S3_BUCKET_NAME,
     prefix: process.env.S3_PREFIX || 'documents/',
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID?.trim() || '',
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY?.trim() || '',
   };
+}
+
+function hasStaticCredentials({ accessKeyId, secretAccessKey }) {
+  return Boolean(accessKeyId && secretAccessKey);
 }
 
 export function assertConfigured() {
   if (!isEnabled()) return;
-  const { bucket, accessKeyId, secretAccessKey } = getConfig();
-  const missing = [];
-  if (!bucket) missing.push('S3_BUCKET_NAME');
-  if (!accessKeyId) missing.push('AWS_ACCESS_KEY_ID');
-  if (!secretAccessKey) missing.push('AWS_SECRET_ACCESS_KEY');
-  if (missing.length) {
-    throw new Error(`S3 is enabled but missing required env vars: ${missing.join(', ')}`);
+  const { bucket } = getConfig();
+  if (!bucket) {
+    throw new Error('S3 is enabled but missing required env var: S3_BUCKET_NAME');
   }
 }
 
@@ -51,10 +55,15 @@ function getClient() {
   assertConfigured();
   if (!_client) {
     const { region, accessKeyId, secretAccessKey } = getConfig();
-    _client = new S3Client({
-      region,
-      credentials: { accessKeyId, secretAccessKey },
-    });
+    const clientConfig = { region };
+
+    // Only pin static keys when both are set (local/dev).
+    // On ECS, omit credentials so the SDK uses the task role.
+    if (hasStaticCredentials({ accessKeyId, secretAccessKey })) {
+      clientConfig.credentials = { accessKeyId, secretAccessKey };
+    }
+
+    _client = new S3Client(clientConfig);
   }
   return _client;
 }
