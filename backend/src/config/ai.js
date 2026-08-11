@@ -15,6 +15,7 @@ import { createGoogle } from '@ai-sdk/google';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import dotenv from 'dotenv';
+import { secretEnv } from './secrets.js';
 
 dotenv.config();
 
@@ -23,14 +24,22 @@ const MODEL_ID = process.env.AI_MODEL || 'gemini-2.5-pro';
 const EMBED_MODEL = process.env.AI_EMBED_MODEL || 'gemini-embedding-001';
 const EMBED_DIMENSIONS = parseInt(process.env.AI_EMBED_DIMENSIONS || '1536', 10);
 
+function resolveGeminiApiKey() {
+  return (
+    secretEnv('GEMINI_API_KEY') ||
+    secretEnv('GOOGLE_GENERATIVE_AI_API_KEY') ||
+    ''
+  );
+}
+
 const googleProvider = createGoogle({
-  apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+  apiKey: resolveGeminiApiKey(),
 });
 
 const chatProviders = {
   google: googleProvider,
-  anthropic: createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY }),
-  openai: createOpenAI({ apiKey: process.env.OPENAI_API_KEY }),
+  anthropic: createAnthropic({ apiKey: secretEnv('ANTHROPIC_API_KEY') }),
+  openai: createOpenAI({ apiKey: secretEnv('OPENAI_API_KEY') }),
 };
 
 export function getChatModel() {
@@ -63,14 +72,14 @@ function normalizeL2(values) {
 
 function assertKeyForProvider(provider) {
   const keys = {
-    google: process.env.GEMINI_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-    anthropic: process.env.ANTHROPIC_API_KEY,
-    openai: process.env.OPENAI_API_KEY,
+    google: resolveGeminiApiKey(),
+    anthropic: secretEnv('ANTHROPIC_API_KEY'),
+    openai: secretEnv('OPENAI_API_KEY'),
   };
   const key = keys[provider]?.trim();
-  if (!key || /your-key|your-api-key/i.test(key)) {
+  if (!key || /your-key|your-api-key/i.test(key) || key.startsWith('{')) {
     const hints = {
-      google: 'Set GEMINI_API_KEY in backend/.env (https://aistudio.google.com/apikey).',
+      google: 'Set GEMINI_API_KEY in backend/.env or ECS Secrets (https://aistudio.google.com/apikey).',
       anthropic: 'Set ANTHROPIC_API_KEY in backend/.env (https://console.anthropic.com/settings/keys).',
       openai: 'Set OPENAI_API_KEY in backend/.env (https://platform.openai.com/api-keys).',
     };
