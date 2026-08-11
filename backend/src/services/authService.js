@@ -1,8 +1,9 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
+import { secretEnv } from '../config/secrets.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+const JWT_SECRET = secretEnv('JWT_SECRET') || 'dev-secret-change-in-production';
 const JWT_EXPIRES = process.env.JWT_EXPIRES_IN || '7d';
 
 // In-memory user store — replace with DB table in production

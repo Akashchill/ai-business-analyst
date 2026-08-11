@@ -1,3 +1,5 @@
+import { resolveSecretValue } from './secrets.js';
+
 function env(name, fallback) {
   const raw = process.env[name];
   if (raw == null || raw === '') return fallback;
@@ -6,46 +8,10 @@ function env(name, fallback) {
 }
 
 /**
- * Resolve DB password from env.
- * ECS + Secrets Manager often injects a JSON secret as the whole string, e.g.
- *   {"username":"postgres","password":"secret"}
- * instead of the bare password (missing `:password::` JSON key in valueFrom).
+ * Resolve DB password from env (Secrets Manager JSON-safe).
  */
 export function resolveDbPassword(raw) {
-  if (raw == null || raw === '') return raw;
-  let value = String(raw).trim();
-
-  // Strip one layer of wrapping quotes: "secret" or 'secret'
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    value = value.slice(1, -1).trim();
-  }
-
-  if (value.startsWith('{') && value.endsWith('}')) {
-    try {
-      const parsed = JSON.parse(value);
-      if (parsed && typeof parsed === 'object') {
-        const fromJson =
-          parsed.password ??
-          parsed.DB_PASSWORD ??
-          parsed.db_password ??
-          parsed.Password;
-        if (typeof fromJson === 'string' && fromJson.length > 0) {
-          console.warn(
-            '⚠️  DB_PASSWORD looked like a Secrets Manager JSON object; extracted the password field. ' +
-              'Prefer ECS valueFrom with a JSON key, e.g. arn:...:secret:name:password::'
-          );
-          return fromJson.trim();
-        }
-      }
-    } catch {
-      // not JSON — use as-is
-    }
-  }
-
-  return value;
+  return resolveSecretValue(raw, ['password', 'DB_PASSWORD', 'db_password', 'Password']);
 }
 
 function shouldUseSsl(host) {
