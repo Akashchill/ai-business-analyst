@@ -199,23 +199,93 @@ Company documents uploaded: ${hasDocuments}
 Intents (pick exactly one):
 - greeting: hellos, thanks, small talk, "hi", "how are you"
 - analytics_sql: questions answerable by querying a database (counts, totals, trends, sales, users, orders, metrics)
-- company_documents: questions about uploaded company files, policies, reports, internal docs
-- general_business: general business advice or concepts that do NOT need live database or document lookup
-- out_of_scope: unrelated topics (jokes, coding homework, personal chat, trivia, anything outside business analytics)`;
+- company_documents: questions about uploaded company files, policies, reports, internal docs, OR asking about a specific person/product/company/topic that may appear in those documents (e.g. "tell me about Medyn", "what is our leave policy", "summarize the Q3 report")
+- general_business: ONLY generic business advice with no need to look up THIS company's data or docs (e.g. "what is EBITDA", "tips for cash flow")
+- out_of_scope: unrelated topics (jokes, coding homework, personal chat, trivia, anything outside business analytics)
+
+Rules:
+- If documents are uploaded (true) and the question asks to explain/describe/"tell me about" a named topic, person, product, policy, or company — choose company_documents (NOT analytics_sql, NOT general_business).
+- Prefer analytics_sql ONLY when the answer needs database metrics/aggregations (counts, totals, trends, rankings over tables).
+- "tell me about X" / "what is our policy" style questions are company_documents when docs exist, even if X sounds like a business term.`;
 
   try {
-    return await generateAgentObject({ prompt, schema: intentSchema, maxOutputTokens: 200 });
+    const result = await generateAgentObject({ prompt, schema: intentSchema, maxOutputTokens: 200 });
+    return correctIntent(result, question, hasDocuments);
   } catch {
-    // Short messages without data keywords → greeting; otherwise try analytics
-    const q = question.trim().toLowerCase();
-    if (/^(hi|hello|hey|thanks|thank you|good morning|good evening)\b/.test(q)) {
-      return { intent: 'greeting', confidence: 0.9, reasoning: 'heuristic' };
-    }
-    if (q.length < 20 && !/\?/.test(q)) {
-      return { intent: 'greeting', confidence: 0.7, reasoning: 'heuristic' };
-    }
-    return { intent: 'analytics_sql', confidence: 0.5, reasoning: 'fallback' };
+    return heuristicIntent(question, hasDocuments);
   }
+}
+
+function looksLikeDocumentQuestion(question) {
+  const q = question.trim().toLowerCase();
+  if (!q) return false;
+  if (/\b(document|policy|handbook|uploaded|pdf|report|contract|sop|guideline|leave policy|hr policy)\b/.test(q)) return true;
+  if (/\b(tell me about|what (is|are)|who is|explain|describe|summarize|summary of)\b/.test(q)) return true;
+  return false;
+}
+
+function looksLikeAnalyticsQuestion(question) {
+  const q = question.trim().toLowerCase();
+  return /\b(count|total|sum|average|avg|trend|sales|revenue|orders?|users?|how many|top \d+|metric)\b/.test(q);
+}
+
+/** Docs exist + document-style phrasing + not a metric question → must use RAG. */
+function shouldPreferDocuments(question, hasDocuments) {
+  return Boolean(
+    hasDocuments &&
+    looksLikeDocumentQuestion(question) &&
+    !looksLikeAnalyticsQuestion(question),
+  );
+}
+
+function correctIntent(result, question, hasDocuments) {
+  if (!result?.intent) return heuristicIntent(question, hasDocuments);
+
+  // When docs exist, document-style questions must search uploads — never SQL-only or general knowledge.
+  if (
+    shouldPreferDocuments(question, hasDocuments) &&
+    result.intent !== 'company_documents' &&
+    result.intent !== 'greeting'
+  ) {
+    return {
+      ...result,
+      intent: 'company_documents',
+      confidence: Math.max(result.confidence || 0.6, 0.8),
+      reasoning: `${result.reasoning || 'classifier'}; corrected to company_documents (docs available, document-style question)`,
+    };
+  }
+
+  return result;
+}
+
+function heuristicIntent(question, hasDocuments) {
+  const q = question.trim().toLowerCase();
+  if (/^(hi|hello|hey|thanks|thank you|good morning|good evening)\b/.test(q)) {
+    return { intent: 'greeting', confidence: 0.9, reasoning: 'heuristic' };
+  }
+  if (shouldPreferDocuments(question, hasDocuments)) {
+    return { intent: 'company_documents', confidence: 0.8, reasoning: 'heuristic-docs' };
+  }
+  if (looksLikeAnalyticsQuestion(question)) {
+    return { intent: 'analytics_sql', confidence: 0.7, reasoning: 'heuristic-sql' };
+  }
+  if (q.length < 20 && !/\?/.test(q)) {
+    return { intent: 'greeting', confidence: 0.7, reasoning: 'heuristic' };
+  }
+  return { intent: hasDocuments ? 'company_documents' : 'analytics_sql', confidence: 0.5, reasoning: 'fallback' };
+}
+
+/** Force RAG-only plan for document-style questions when uploads exist. */
+function forceDocumentPlan(plan, question) {
+  return {
+    ...plan,
+    needsSQL: false,
+    needsDocuments: true,
+    sqlReason: '',
+    docReason: plan.docReason || `Find relevant passages in uploaded documents for: ${question.trim()}`,
+    questionType: 'explanation',
+    expectsRows: false,
+  };
 }
 
 // ── Direct LLM response (greeting / general_business) ─────────────────────────
@@ -290,6 +360,11 @@ function planFromIntent(intent, hasDocuments, question = '') {
 }
 
 async function plannerAgent(question, intent, hasDocuments) {
+  // Hard route: never let document-style questions fall through to SQL-only when docs exist.
+  if (intent === 'company_documents' || shouldPreferDocuments(question, hasDocuments)) {
+    return planFromIntent('company_documents', hasDocuments, question);
+  }
+
   const prompt = `Plan how to answer this business analytics question.
 
 Question: "${question}"
@@ -303,18 +378,29 @@ Return a routing plan:
 - docReason: why document search is needed (if any)
 - complexity: simple | moderate | complex
 - questionType: metric | trend | comparison | ranking | breakdown | explanation
-- expectsRows: true if the user likely expects non-empty SQL results`;
+- expectsRows: true if the user likely expects non-empty SQL results
+
+Rules:
+- If intent is company_documents, set needsSQL=false and needsDocuments=true (when documents available).
+- If intent is analytics_sql, set needsSQL=true. Only set needsDocuments=true if the question also asks about policies/reports/uploaded files.
+- Do not choose SQL for "tell me about X" / policy / document explanation questions.`;
 
   try {
     const plan = await generateAgentObject({ prompt, schema: plannerSchema, maxOutputTokens: 280 });
+    if (shouldPreferDocuments(question, hasDocuments)) {
+      return forceDocumentPlan(plan, question);
+    }
     if (intent === 'analytics_sql') {
       plan.needsSQL = true;
-      plan.needsDocuments = false;
+      // Keep optional hybrid RAG only when the question also references docs/policies.
+      if (!looksLikeDocumentQuestion(question)) {
+        plan.needsDocuments = false;
+      } else if (hasDocuments) {
+        plan.needsDocuments = true;
+      }
     }
     if (intent === 'company_documents') {
-      plan.needsSQL = false;
-      plan.needsDocuments = hasDocuments;
-      if (!plan.docReason) plan.docReason = `Search documents for: ${question.trim()}`;
+      return forceDocumentPlan(plan, question);
     }
     if (plan.needsSQL && !plan.sqlReason) {
       plan.sqlReason = `Answer "${question.trim()}" via SQL`;
@@ -447,11 +533,21 @@ async function runSqlWithGuard(question, schema, plan, conversationHistory, dbTy
 
 // ── 3. RAG Agent ──────────────────────────────────────────────────────────────
 
-const RAG_MIN_SIMILARITY = 0.55;
+// Cosine similarity floor. Slightly soft so short queries ("tell me about policy")
+// still surface the best available chunks when the corpus is small.
+const RAG_MIN_SIMILARITY = 0.42;
+const RAG_FALLBACK_MIN_SIMILARITY = 0.28;
 
 async function ragAgent(question, emit) {
   const chunks = await retrieveRelevantChunks(question, 5);
-  const relevant = chunks.filter(c => c.similarity >= RAG_MIN_SIMILARITY);
+  let relevant = chunks.filter(c => c.similarity >= RAG_MIN_SIMILARITY);
+  // With sparse corpora, take the best chunk(s) rather than returning nothing.
+  if (!relevant.length && chunks.length) {
+    const best = chunks[0];
+    if (best.similarity >= RAG_FALLBACK_MIN_SIMILARITY) {
+      relevant = chunks.filter(c => c.similarity >= Math.max(RAG_FALLBACK_MIN_SIMILARITY, best.similarity - 0.08)).slice(0, 3);
+    }
+  }
   if (!relevant.length) return null;
 
   const context = relevant.map((c) =>
@@ -488,6 +584,16 @@ const RAG_NO_CONTEXT_MESSAGE =
 
 // ── 4. Visualization Agent ────────────────────────────────────────────────────
 
+function isRenderableChart(viz) {
+  return Boolean(viz?.chartType && viz.chartType !== 'table' && viz.chartConfig?.xKey && viz.chartConfig?.yKey);
+}
+
+function resolveViz(llm, rules) {
+  if (isRenderableChart(llm)) return { chartType: llm.chartType, chartConfig: llm.chartConfig };
+  if (isRenderableChart(rules)) return { chartType: rules.chartType, chartConfig: rules.chartConfig };
+  return { chartType: llm?.chartType || rules.chartType || 'table', chartConfig: llm?.chartConfig || rules.chartConfig || null };
+}
+
 async function visualizationAgent(question, rows, plan) {
   if (!rows?.length) return { chartType: 'table', chartConfig: null };
 
@@ -506,11 +612,16 @@ SQL reason: ${plan.sqlReason}
 Data columns: ${keys.join(', ')}
 Sample rows: ${JSON.stringify(sample)}
 Row count: ${rows.length}
+Suggested chart: ${rules.chartType}${rules.chartConfig ? ` (x=${rules.chartConfig.xKey}, y=${rules.chartConfig.yKey})` : ''}
 
-Column roles could not be determined by rules alone. Choose the best chart type and axis mapping.`;
+Choose the best chart type and axis mapping.
+Prefer bar, line, pie, or number whenever there is a category/date column and at least one numeric measure.
+Only use table when the data cannot reasonably be visualized.
+If multiple numeric columns exist, pick the measure that best answers the question as yKey.`;
 
   try {
-    return await generateAgentObject({ prompt, schema: visualizationSchema, maxOutputTokens: 200 });
+    const llm = await generateAgentObject({ prompt, schema: visualizationSchema, maxOutputTokens: 200 });
+    return resolveViz(llm, rules);
   } catch {
     return { chartType: rules.chartType, chartConfig: rules.chartConfig };
   }
@@ -521,6 +632,19 @@ Column roles could not be determined by rules alone. Choose the best chart type 
 async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult, emit }) {
   const hasSqlRows = Boolean(sqlResult?.rows?.length);
   const hasRag = Boolean(ragResult?.answer && !ragResult.noContext);
+
+  // Document-only path with no useful chunks: surface RAG message, not SQL seeding advice.
+  if (!hasSqlRows && !hasRag && (ragResult?.noContext || (plan.needsDocuments && !plan.needsSQL))) {
+    return sanitizeInsight({
+      summary: ragResult?.answer || RAG_NO_CONTEXT_MESSAGE,
+      keyFindings: [],
+      recommendations: [
+        'Try rephrasing with terms that appear in your documents',
+        'Upload additional PDFs/Word files that cover this topic',
+      ],
+      severity: 'neutral',
+    });
+  }
 
   // Empty SQL result: never call the insight LLM (~3s saved)
   if (sqlMeta?.sql && !hasSqlRows && !hasRag) {
@@ -617,14 +741,24 @@ export async function runAgentPipeline(question, options = {}) {
   } catch (err) {
     console.warn('RAG tables unavailable:', err.message);
   }
-  const hasDocuments = docStats.documentCount > 0;
+  // Prefer chunkCount so we only claim RAG is available when vectors exist.
+  const hasDocuments = (docStats.chunkCount || 0) > 0 || docStats.documentCount > 0;
 
   // Step 0: Intent classification
   pushRunningStep(steps, 'intent', emit);
-  const classification = await intentClassifier(question, hasDocuments);
+  let classification = await intentClassifier(question, hasDocuments);
+  // Belt-and-suspenders: never let document-style Qs stay on analytics_sql when uploads exist.
+  if (shouldPreferDocuments(question, hasDocuments) && classification.intent !== 'company_documents') {
+    classification = {
+      ...classification,
+      intent: 'company_documents',
+      confidence: Math.max(classification.confidence || 0.6, 0.85),
+      reasoning: `${classification.reasoning || 'classifier'}; pipeline override → company_documents`,
+    };
+  }
   finishStep(steps, 0);
   emitSteps(emit, steps);
-  const { intent } = classification;
+  let { intent } = classification;
 
   // Greeting / general business → direct LLM reply
   if (intent === 'greeting' || intent === 'general_business') {
@@ -632,11 +766,16 @@ export async function runAgentPipeline(question, options = {}) {
     const message = await directChatAgent(question, intent, conversationHistory, emit);
     finishStep(steps, 1);
     emitSteps(emit, steps);
+    const text = (message || '').trim() || (
+      intent === 'greeting'
+        ? 'Hi! I can answer questions about your database or search your uploaded company documents.'
+        : 'I could not generate a reply. Try asking about your uploaded documents or a database metric.'
+    );
     return makeDirectResponse({
       question,
       intent,
       responseMode: 'direct',
-      message: message.trim(),
+      message: text,
       steps,
       startTime,
     });
@@ -668,7 +807,11 @@ export async function runAgentPipeline(question, options = {}) {
 
   // Planner: routing + question metadata for downstream agents
   pushRunningStep(steps, 'planner', emit);
-  const plan = await plannerAgent(question, intent, hasDocuments);
+  let plan = await plannerAgent(question, intent, hasDocuments);
+  if (shouldPreferDocuments(question, hasDocuments)) {
+    intent = 'company_documents';
+    plan = forceDocumentPlan(plan, question);
+  }
   finishStep(steps, steps.length - 1);
   emitSteps(emit, steps);
 
@@ -707,7 +850,8 @@ export async function runAgentPipeline(question, options = {}) {
 
   await Promise.all(tasks);
 
-  if (intent === 'company_documents' && plan.needsDocuments && hasDocuments && !ragResult) {
+  // Document-primary path: always surface a RAG outcome (answer or explicit no-context).
+  if (plan.needsDocuments && !plan.needsSQL && hasDocuments && !ragResult) {
     ragResult = {
       answer: RAG_NO_CONTEXT_MESSAGE,
       sources: [],
