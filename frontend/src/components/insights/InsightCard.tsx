@@ -8,6 +8,7 @@ interface InsightCardProps {
   ragSources?: string[];
   steps?: AgentStep[];
   totalDuration?: number;
+  streaming?: boolean;
 }
 
 const severityIcon = (s?: string) => {
@@ -21,22 +22,27 @@ const agentIcon: Record<string, string> = {
   intent: '🎯', chat: '💬', planner: '🧠', sql: '🗄️', rag: '📚', visualization: '📊', insight: '💡',
 };
 
-export default function InsightCard({ insight, ragAnswer, ragSources, steps, totalDuration }: InsightCardProps) {
+export default function InsightCard({ insight, ragAnswer, ragSources, steps, totalDuration, streaming }: InsightCardProps) {
   if (!insight) return null;
 
   return (
     <div className="space-y-3 animate-slide-up">
       {/* Executive summary */}
-      <div className={`border rounded-xl p-4 ${severityBg(insight.severity)}`}>
-        <div className="flex items-start gap-3">
-          <div className="mt-0.5">{severityIcon(insight.severity)}</div>
-          <div className="flex-1">
-            <p className={`text-sm font-medium leading-relaxed ${severityColor(insight.severity)}`}>
-              {insight.summary}
-            </p>
+      {insight.summary && (
+        <div className={`border rounded-xl p-4 ${severityBg(insight.severity)}`}>
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5">{severityIcon(insight.severity)}</div>
+            <div className="flex-1">
+              <p className={`text-sm font-medium leading-relaxed ${severityColor(insight.severity)}`}>
+                {insight.summary}
+                {streaming && (
+                  <span className="inline-block w-1.5 h-4 ml-0.5 bg-indigo-400 animate-pulse align-middle" />
+                )}
+              </p>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Key findings */}
       {insight.keyFindings?.length > 0 && (

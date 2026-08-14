@@ -117,7 +117,8 @@ export async function agentQuery(
 
 export type AgentStreamEvent =
   | { event: 'step'; data: { steps: AgentStep[] } }
-  | { event: 'partial'; data: AgentResult }
+  | { event: 'partial'; data: Partial<AgentResult> }
+  | { event: 'insight'; data: Partial<InsightReport> }
   | { event: 'token'; data: { text: string; field?: 'rag' } }
   | { event: 'done'; data: AgentResult }
   | { event: 'error'; data: { error: string } };

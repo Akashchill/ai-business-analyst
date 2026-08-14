@@ -62,6 +62,12 @@ export default function MessageBubble({ role, content, result, loading, streamin
     const hasChart = result.success && !isDirectReply && result.rows.length > 0 && result.chartType !== 'table';
     const hasTable = result.success && !isDirectReply && result.rows.length > 0;
     const streamingSummary = result.insight?.summary;
+    const hasStreamingInsight = Boolean(
+      streamingSummary ||
+      result.insight?.keyFindings?.length ||
+      result.insight?.recommendations?.length
+    );
+    const isChatLike = !hasTable && !result.insight?.keyFindings?.length;
 
     return (
       <div className="flex gap-3 mb-5 animate-slide-up">
@@ -97,7 +103,7 @@ export default function MessageBubble({ role, content, result, loading, streamin
             </div>
           )}
 
-          {streamingSummary && (
+          {isChatLike && streamingSummary && (
             <div className="bg-slate-800 border border-slate-700 rounded-xl px-4 py-3">
               <p className="text-sm text-slate-300 leading-relaxed">
                 {streamingSummary}
@@ -106,7 +112,18 @@ export default function MessageBubble({ role, content, result, loading, streamin
             </div>
           )}
 
-          {result.ragAnswer && (
+          {!isChatLike && hasStreamingInsight && (
+            <InsightCard
+              insight={result.insight}
+              ragAnswer={result.ragAnswer}
+              ragSources={result.ragSources}
+              steps={result.steps}
+              totalDuration={result.totalDuration}
+              streaming
+            />
+          )}
+
+          {!hasStreamingInsight && result.ragAnswer && (
             <div className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl px-4 py-3">
               <p className="text-sm text-slate-300 leading-relaxed">
                 {result.ragAnswer}

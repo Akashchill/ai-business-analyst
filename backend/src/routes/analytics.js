@@ -40,6 +40,7 @@ function validateQueryInput(body) {
 
 function sendSse(res, event, data) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  if (typeof res.flush === 'function') res.flush();
 }
 
 // POST /api/agent/query — full multi-agent pipeline (JSON or SSE stream)
