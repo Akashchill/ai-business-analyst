@@ -26,6 +26,41 @@ function cardinality(rows, key) {
   return new Set(rows.map((r) => String(r[key]))).size;
 }
 
+const YKEY_PREFERENCE = [
+  /revenue/, /sales/, /amount/, /spend/, /value/, /total(?!_?(qty|quantity|count))/,
+];
+const GENERIC_KEY_TOKENS = new Set(['total', 'sum', 'the', 'and', 'for', 'avg', 'average', 'count']);
+
+function mentionScore(key, question) {
+  const tokens = key.toLowerCase().replace(/_/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !GENERIC_KEY_TOKENS.has(t));
+  if (!tokens.length) return 0;
+  return tokens.filter((t) => question.includes(t)).length;
+}
+
+/**
+ * Pick one numeric column as the chart measure when several exist.
+ * Prefers a column named in the question, then revenue-like metrics.
+ */
+export function pickPreferredYKey(numericKeys, question = '') {
+  if (!numericKeys.length) return null;
+  const q = question.toLowerCase();
+  let best = null;
+  let bestScore = 0;
+  for (const k of numericKeys) {
+    const score = mentionScore(k, q);
+    if (score > bestScore) {
+      best = k;
+      bestScore = score;
+    }
+  }
+  if (best) return best;
+  for (const re of YKEY_PREFERENCE) {
+    const match = numericKeys.find((k) => re.test(k.toLowerCase()));
+    if (match) return match;
+  }
+  return numericKeys[0];
+}
+
 /**
  * Rules-first chart selection. Returns ambiguous: true when LLM should decide.
  */
@@ -85,8 +120,27 @@ export function pickChartByRules(question, rows, questionType = 'metric') {
     return { chartType: 'table', chartConfig: null, ambiguous: true };
   }
 
+  // Category/date + multiple metrics: still chartable. Pick one measure so the
+  // UI can render a bar/line instead of falling back to table-only.
   if (numericKeys.length > 1 && (categoryKeys.length >= 1 || dateKeys.length >= 1)) {
-    return { chartType: 'table', chartConfig: null, ambiguous: true };
+    const xKey = dateKeys[0] || categoryKeys[0];
+    const yKey = pickPreferredYKey(numericKeys, question);
+    const cats = categoryKeys.length ? cardinality(rows, categoryKeys[0]) : rows.length;
+
+    if (!dateKeys.length && cats > 50) {
+      return { chartType: 'table', chartConfig: null, ambiguous: false };
+    }
+
+    let chartType = dateKeys.length >= 1 ? 'line' : 'bar';
+    if (!dateKeys.length && questionType === 'breakdown' && cats <= 6 && rows.length <= 12) {
+      chartType = 'pie';
+    }
+
+    return {
+      chartType,
+      chartConfig: { xKey, yKey, title: question },
+      ambiguous: true,
+    };
   }
 
   if (numericKeys.length === 0) {
