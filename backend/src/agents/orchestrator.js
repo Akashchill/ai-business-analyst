@@ -103,6 +103,36 @@ function safeJsonStringify(value) {
   return JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2);
 }
 
+/** Use Vercel stream APIs whenever the client is on SSE; otherwise buffer. */
+function callObject(emit, opts) {
+  if (emit) return streamAgentObject(opts);
+  const { onPartial, ...rest } = opts;
+  return generateAgentObject(rest);
+}
+
+function callText(emit, opts) {
+  if (emit) return streamAgentText(opts);
+  const { onChunk, ...rest } = opts;
+  return generateAgentText(rest);
+}
+
+function insightSnapshot(partial) {
+  if (!partial || typeof partial !== 'object') return {};
+  const out = {};
+  if (typeof partial.summary === 'string') out.summary = partial.summary;
+  if (Array.isArray(partial.keyFindings)) {
+    out.keyFindings = partial.keyFindings.filter((x) => typeof x === 'string');
+  }
+  if (Array.isArray(partial.recommendations)) {
+    out.recommendations = partial.recommendations.filter((x) => typeof x === 'string');
+  }
+  if (typeof partial.trends === 'string') out.trends = partial.trends;
+  if (['positive', 'neutral', 'warning', 'critical'].includes(partial.severity)) {
+    out.severity = partial.severity;
+  }
+  return out;
+}
+
 function buildInsightPromptParts({ sqlResult, sqlMeta, ragResult }) {
   const parts = [];
 
@@ -139,24 +169,15 @@ Rules:
 - If data is insufficient to answer, say so clearly in the summary
 - Keep recommendations grounded in the evidence provided`;
 
-  if (emit) {
-    let lastSummary = '';
-    const insight = await streamAgentObject({
-      prompt,
-      schema: insightSchema,
-      maxOutputTokens: 700,
-      onPartial: (partial) => {
-        if (partial?.summary && typeof partial.summary === 'string') {
-          const delta = partial.summary.slice(lastSummary.length);
-          if (delta) emit('token', { text: delta });
-          lastSummary = partial.summary;
-        }
-      },
-    });
-    return sanitizeInsight(insight);
-  }
-
-  const insight = await generateAgentObject({ prompt, schema: insightSchema, maxOutputTokens: 700 });
+  const insight = await callObject(emit, {
+    prompt,
+    schema: insightSchema,
+    maxOutputTokens: 700,
+    onPartial: (partial) => {
+      const snap = insightSnapshot(partial);
+      if (emit && Object.keys(snap).length) emit('insight', snap);
+    },
+  });
   return sanitizeInsight(insight);
 }
 
@@ -190,7 +211,7 @@ function makeDirectResponse({ question, intent, responseMode, message, steps, st
 
 // ── 0. Intent Classifier ──────────────────────────────────────────────────────
 
-async function intentClassifier(question, hasDocuments) {
+async function intentClassifier(question, hasDocuments, emit) {
   const prompt = `Classify the user message for a Business Analytics assistant.
 
 User message: "${question}"
@@ -209,7 +230,7 @@ Rules:
 - "tell me about X" / "what is our policy" style questions are company_documents when docs exist, even if X sounds like a business term.`;
 
   try {
-    const result = await generateAgentObject({ prompt, schema: intentSchema, maxOutputTokens: 200 });
+    const result = await callObject(emit, { prompt, schema: intentSchema, maxOutputTokens: 200 });
     return correctIntent(result, question, hasDocuments);
   } catch {
     return heuristicIntent(question, hasDocuments);
@@ -300,16 +321,16 @@ async function directChatAgent(question, intent, conversationHistory = [], emit)
     { role: 'user', content: question },
   ];
 
-  if (emit) {
-    return streamAgentText({
-      system,
-      messages,
-      maxOutputTokens: 400,
-      onChunk: (text) => emit('token', { text }),
-    });
-  }
-
-  return generateAgentText({ system, messages, maxOutputTokens: 400 });
+  let text = '';
+  return callText(emit, {
+    system,
+    messages,
+    maxOutputTokens: 400,
+    onChunk: (chunk) => {
+      text += chunk;
+      if (emit) emit('insight', { summary: text });
+    },
+  });
 }
 
 function planFromIntent(intent, hasDocuments, question = '') {
@@ -359,7 +380,7 @@ function planFromIntent(intent, hasDocuments, question = '') {
   };
 }
 
-async function plannerAgent(question, intent, hasDocuments) {
+async function plannerAgent(question, intent, hasDocuments, emit) {
   // Hard route: never let document-style questions fall through to SQL-only when docs exist.
   if (intent === 'company_documents' || shouldPreferDocuments(question, hasDocuments)) {
     return planFromIntent('company_documents', hasDocuments, question);
@@ -386,7 +407,7 @@ Rules:
 - Do not choose SQL for "tell me about X" / policy / document explanation questions.`;
 
   try {
-    const plan = await generateAgentObject({ prompt, schema: plannerSchema, maxOutputTokens: 280 });
+    const plan = await callObject(emit, { prompt, schema: plannerSchema, maxOutputTokens: 280 });
     if (shouldPreferDocuments(question, hasDocuments)) {
       return forceDocumentPlan(plan, question);
     }
@@ -420,7 +441,7 @@ function expectsSqlRows(plan) {
 
 // ── 2. SQL Agent ──────────────────────────────────────────────────────────────
 
-async function sqlAgent(question, schema, plan, conversationHistory = [], priorAttempt = null) {
+async function sqlAgent(question, schema, plan, conversationHistory = [], priorAttempt = null, emit = null) {
   const schemaText = schemaToText(schema);
   const system = `You are an expert PostgreSQL analyst.
 
@@ -468,20 +489,20 @@ Return corrected SQL that passes validation (single SELECT only) and answers the
   }
 
   try {
-    return await generateAgentObject({ system, messages, schema: sqlSchema, maxOutputTokens: 1000 });
+    return await callObject(emit, { system, messages, schema: sqlSchema, maxOutputTokens: 1000 });
   } catch {
     return { sql: null, explanation: 'Failed to generate SQL', confidence: 0 };
   }
 }
 
-async function runSqlWithGuard(question, schema, plan, conversationHistory, dbType) {
+async function runSqlWithGuard(question, schema, plan, conversationHistory, dbType, emit) {
   let sqlMeta = null;
   let sqlResult = null;
   let sqlRetries = 0;
   let priorAttempt = null;
 
   for (let attempt = 0; attempt <= SQL_MAX_RETRIES; attempt++) {
-    sqlMeta = await sqlAgent(question, schema, plan, conversationHistory, priorAttempt);
+    sqlMeta = await sqlAgent(question, schema, plan, conversationHistory, priorAttempt, emit);
 
     if (!sqlMeta.sql) break;
 
@@ -565,9 +586,11 @@ Rules:
 - Cite source filenames inline (e.g. "According to [filename], ...") for every factual claim
 - Plain text, 3-5 sentences`;
 
-  const answer = emit
-    ? await streamAgentText({ prompt, maxOutputTokens: 400, onChunk: (text) => emit('token', { text, field: 'rag' }) })
-    : await generateAgentText({ prompt, maxOutputTokens: 400 });
+  const answer = await callText(emit, {
+    prompt,
+    maxOutputTokens: 400,
+    onChunk: (text) => { if (emit) emit('token', { text, field: 'rag' }); },
+  });
   const topSimilarity = relevant[0]?.similarity ?? 0;
 
   return {
@@ -594,7 +617,7 @@ function resolveViz(llm, rules) {
   return { chartType: llm?.chartType || rules.chartType || 'table', chartConfig: llm?.chartConfig || rules.chartConfig || null };
 }
 
-async function visualizationAgent(question, rows, plan) {
+async function visualizationAgent(question, rows, plan, emit) {
   if (!rows?.length) return { chartType: 'table', chartConfig: null };
 
   const rules = pickChartByRules(question, rows, plan.questionType);
@@ -620,7 +643,7 @@ Only use table when the data cannot reasonably be visualized.
 If multiple numeric columns exist, pick the measure that best answers the question as yKey.`;
 
   try {
-    const llm = await generateAgentObject({ prompt, schema: visualizationSchema, maxOutputTokens: 200 });
+    const llm = await callObject(emit, { prompt, schema: visualizationSchema, maxOutputTokens: 200 });
     return resolveViz(llm, rules);
   } catch {
     return { chartType: rules.chartType, chartConfig: rules.chartConfig };
@@ -693,16 +716,15 @@ async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult, emi
         });
       }
       try {
-        const text = emit
-          ? await streamAgentText({
-            prompt: `${parts.join('\n\n')}\n\nQuestion: "${question}"\nType: ${plan.questionType}\nFocus: ${plan.sqlReason || plan.docReason}\nRespond in plain text: a 2-3 sentence executive summary using only the numbers above.`,
-            maxOutputTokens: 500,
-            onChunk: (chunk) => emit('token', { text: chunk }),
-          })
-          : await generateAgentText({
-            prompt: `${parts.join('\n\n')}\n\nQuestion: "${question}"\nType: ${plan.questionType}\nFocus: ${plan.sqlReason || plan.docReason}\nRespond in plain text: a 2-3 sentence executive summary using only the numbers above.`,
-            maxOutputTokens: 500,
-          });
+        let summary = '';
+        const text = await callText(emit, {
+          prompt: `${parts.join('\n\n')}\n\nQuestion: "${question}"\nType: ${plan.questionType}\nFocus: ${plan.sqlReason || plan.docReason}\nRespond in plain text: a 2-3 sentence executive summary using only the numbers above.`,
+          maxOutputTokens: 500,
+          onChunk: (chunk) => {
+            summary += chunk;
+            if (emit) emit('insight', { summary });
+          },
+        });
         return sanitizeInsight({
           summary: text.trim(),
           keyFindings: [],
@@ -746,7 +768,7 @@ export async function runAgentPipeline(question, options = {}) {
 
   // Step 0: Intent classification
   pushRunningStep(steps, 'intent', emit);
-  let classification = await intentClassifier(question, hasDocuments);
+  let classification = await intentClassifier(question, hasDocuments, emit);
   // Belt-and-suspenders: never let document-style Qs stay on analytics_sql when uploads exist.
   if (shouldPreferDocuments(question, hasDocuments) && classification.intent !== 'company_documents') {
     classification = {
@@ -807,7 +829,7 @@ export async function runAgentPipeline(question, options = {}) {
 
   // Planner: routing + question metadata for downstream agents
   pushRunningStep(steps, 'planner', emit);
-  let plan = await plannerAgent(question, intent, hasDocuments);
+  let plan = await plannerAgent(question, intent, hasDocuments, emit);
   if (shouldPreferDocuments(question, hasDocuments)) {
     intent = 'company_documents';
     plan = forceDocumentPlan(plan, question);
@@ -822,6 +844,38 @@ export async function runAgentPipeline(question, options = {}) {
   let ragConfidence = null;
   let vizResult = null;
 
+  const emitAnalyticsPartial = () => {
+    if (!emit) return;
+    const payload = {
+      question,
+      intent,
+      responseMode: 'analytics',
+      plan,
+      sql: sqlMeta?.sql || null,
+      sqlExplanation: sqlMeta?.explanation || null,
+      sqlRetries: sqlRetries || undefined,
+      ragConfidence,
+      steps: steps.map((s) => ({ ...s })),
+      totalDuration: Date.now() - startTime,
+      success: true,
+    };
+    if (sqlResult) {
+      payload.rows = sqlResult.rows || [];
+      payload.rowCount = sqlResult.rowCount || 0;
+      payload.fields = sqlResult.fields || [];
+      payload.duration = sqlResult.duration || 0;
+    }
+    if (vizResult) {
+      payload.chartType = vizResult.chartType;
+      payload.chartConfig = vizResult.chartConfig;
+    }
+    if (ragResult) {
+      payload.ragAnswer = ragResult.answer || null;
+      payload.ragSources = ragResult.sources || [];
+    }
+    emit('partial', payload);
+  };
+
   const schema = plan.needsSQL ? await getCachedSchema(dbType) : null;
   const tasks = [];
 
@@ -829,12 +883,17 @@ export async function runAgentPipeline(question, options = {}) {
     tasks.push((async () => {
       const stepIdx = steps.length;
       pushRunningStep(steps, 'sql', emit);
-      const sqlRun = await runSqlWithGuard(question, schema, plan, conversationHistory, dbType);
+      const sqlRun = await runSqlWithGuard(question, schema, plan, conversationHistory, dbType, emit);
       sqlMeta = sqlRun.sqlMeta;
       sqlResult = sqlRun.sqlResult;
       sqlRetries = sqlRun.sqlRetries;
+      if (sqlResult?.rows?.length) {
+        const rules = pickChartByRules(question, sqlResult.rows, plan.questionType);
+        vizResult = { chartType: rules.chartType, chartConfig: rules.chartConfig };
+      }
       finishStep(steps, stepIdx);
       emitSteps(emit, steps);
+      emitAnalyticsPartial();
     })());
   }
 
@@ -845,6 +904,7 @@ export async function runAgentPipeline(question, options = {}) {
       ragResult = await ragAgent(question, emit);
       finishStep(steps, stepIdx);
       emitSteps(emit, steps);
+      emitAnalyticsPartial();
     })());
   }
 
@@ -869,44 +929,17 @@ export async function runAgentPipeline(question, options = {}) {
   if (sqlResult?.rows?.length) {
     const stepIdx = steps.length;
     pushRunningStep(steps, 'visualization', emit);
-    vizResult = await visualizationAgent(question, sqlResult.rows, plan);
+    vizResult = await visualizationAgent(question, sqlResult.rows, plan, emit);
     finishStep(steps, stepIdx);
     emitSteps(emit, steps);
   }
 
-  if (emit) {
-    emit('partial', {
-      question,
-      intent,
-      responseMode: 'analytics',
-      plan,
-      sql: sqlMeta?.sql || null,
-      sqlExplanation: sqlMeta?.explanation || null,
-      rows: sqlResult?.rows || [],
-      rowCount: sqlResult?.rowCount || 0,
-      fields: sqlResult?.fields || [],
-      duration: sqlResult?.duration || 0,
-      chartType: vizResult?.chartType || 'table',
-      chartConfig: vizResult?.chartConfig || null,
-      ragAnswer: ragResult?.answer || null,
-      ragSources: ragResult?.sources || [],
-      ragConfidence,
-      sqlRetries: sqlRetries || undefined,
-      insight: {
-        summary: '',
-        keyFindings: [],
-        recommendations: [],
-        severity: 'neutral',
-      },
-      steps: steps.map((s) => ({ ...s })),
-      totalDuration: Date.now() - startTime,
-      success: true,
-    });
-  }
+  emitAnalyticsPartial();
 
   const stepIdx = steps.length;
   pushRunningStep(steps, 'insight', emit);
   const insight = await insightAgent({ question, plan, sqlResult, sqlMeta, ragResult, emit });
+  if (emit) emit('insight', insight);
   finishStep(steps, stepIdx);
   emitSteps(emit, steps);
 

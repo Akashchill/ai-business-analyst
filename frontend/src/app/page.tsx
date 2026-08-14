@@ -41,6 +41,19 @@ function emptyStreamingResult(question: string): AgentResult {
   };
 }
 
+function mergeAgentResult(prev: AgentResult, next: Partial<AgentResult>): AgentResult {
+  return {
+    ...prev,
+    ...next,
+    insight: next.insight ? { ...prev.insight, ...next.insight } : prev.insight,
+    ragAnswer: next.ragAnswer ?? prev.ragAnswer,
+    ragSources: next.ragSources?.length ? next.ragSources : prev.ragSources,
+    rows: next.rows ?? prev.rows,
+    steps: next.steps?.length ? next.steps : prev.steps,
+    chartConfig: next.chartConfig !== undefined ? next.chartConfig : prev.chartConfig,
+  };
+}
+
 const STARTER_QUESTIONS = [
   'How many users are there?',
   'What is total revenue this month?',
@@ -125,7 +138,21 @@ export default function HomePage() {
           }
 
           if (evt.event === 'partial') {
-            return { ...m, loading: true, streaming: true, result: evt.data };
+            const partial = m.result ?? emptyStreamingResult(q);
+            return { ...m, loading: true, streaming: true, result: mergeAgentResult(partial, evt.data) };
+          }
+
+          if (evt.event === 'insight') {
+            const partial = m.result ?? emptyStreamingResult(q);
+            return {
+              ...m,
+              loading: true,
+              streaming: true,
+              result: {
+                ...partial,
+                insight: { ...partial.insight, ...evt.data },
+              },
+            };
           }
 
           if (evt.event === 'token') {
