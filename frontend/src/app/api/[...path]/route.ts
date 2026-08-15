@@ -46,9 +46,11 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
     redirect: 'manual',
   };
 
-  if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
-    init.body = req.body;
-    (init as RequestInit & { duplex: 'half' }).duplex = 'half';
+  // Buffer the inbound body. Piping req.body with duplex:'half' aborts the
+  // backend SSE response ("BodyStreamBuffer was aborted") once the POST ends.
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const buf = await req.arrayBuffer();
+    if (buf.byteLength > 0) init.body = buf;
   }
 
   let backendRes: Response;
