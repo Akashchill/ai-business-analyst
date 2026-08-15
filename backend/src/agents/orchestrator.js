@@ -103,17 +103,17 @@ function safeJsonStringify(value) {
   return JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2);
 }
 
-/** Use Vercel stream APIs whenever the client is on SSE; otherwise buffer. */
-function callObject(emit, opts) {
-  if (emit) return streamAgentObject(opts);
-  const { onPartial, ...rest } = opts;
-  return generateAgentObject(rest);
-}
-
-function callText(emit, opts) {
+/** Stream LLM output only for text the user will see. Internal agents stay buffered. */
+function streamUserText(emit, opts) {
   if (emit) return streamAgentText(opts);
   const { onChunk, ...rest } = opts;
   return generateAgentText(rest);
+}
+
+function streamUserObject(emit, opts) {
+  if (emit) return streamAgentObject(opts);
+  const { onPartial, ...rest } = opts;
+  return generateAgentObject(rest);
 }
 
 function insightSnapshot(partial) {
@@ -169,7 +169,7 @@ Rules:
 - If data is insufficient to answer, say so clearly in the summary
 - Keep recommendations grounded in the evidence provided`;
 
-  const insight = await callObject(emit, {
+  const insight = await streamUserObject(emit, {
     prompt,
     schema: insightSchema,
     maxOutputTokens: 700,
@@ -230,7 +230,7 @@ Rules:
 - "tell me about X" / "what is our policy" style questions are company_documents when docs exist, even if X sounds like a business term.`;
 
   try {
-    const result = await callObject(emit, { prompt, schema: intentSchema, maxOutputTokens: 200 });
+    const result = await generateAgentObject({ prompt, schema: intentSchema, maxOutputTokens: 200 });
     return correctIntent(result, question, hasDocuments);
   } catch {
     return heuristicIntent(question, hasDocuments);
@@ -322,7 +322,7 @@ async function directChatAgent(question, intent, conversationHistory = [], emit)
   ];
 
   let text = '';
-  return callText(emit, {
+  return streamUserText(emit, {
     system,
     messages,
     maxOutputTokens: 400,
@@ -407,7 +407,7 @@ Rules:
 - Do not choose SQL for "tell me about X" / policy / document explanation questions.`;
 
   try {
-    const plan = await callObject(emit, { prompt, schema: plannerSchema, maxOutputTokens: 280 });
+    const plan = await generateAgentObject({ prompt, schema: plannerSchema, maxOutputTokens: 280 });
     if (shouldPreferDocuments(question, hasDocuments)) {
       return forceDocumentPlan(plan, question);
     }
@@ -489,7 +489,7 @@ Return corrected SQL that passes validation (single SELECT only) and answers the
   }
 
   try {
-    return await callObject(emit, { system, messages, schema: sqlSchema, maxOutputTokens: 1000 });
+    return await generateAgentObject({ system, messages, schema: sqlSchema, maxOutputTokens: 1000 });
   } catch {
     return { sql: null, explanation: 'Failed to generate SQL', confidence: 0 };
   }
@@ -586,7 +586,7 @@ Rules:
 - Cite source filenames inline (e.g. "According to [filename], ...") for every factual claim
 - Plain text, 3-5 sentences`;
 
-  const answer = await callText(emit, {
+  const answer = await streamUserText(emit, {
     prompt,
     maxOutputTokens: 400,
     onChunk: (text) => { if (emit) emit('token', { text, field: 'rag' }); },
@@ -643,7 +643,7 @@ Only use table when the data cannot reasonably be visualized.
 If multiple numeric columns exist, pick the measure that best answers the question as yKey.`;
 
   try {
-    const llm = await callObject(emit, { prompt, schema: visualizationSchema, maxOutputTokens: 200 });
+    const llm = await generateAgentObject({ prompt, schema: visualizationSchema, maxOutputTokens: 200 });
     return resolveViz(llm, rules);
   } catch {
     return { chartType: rules.chartType, chartConfig: rules.chartConfig };
@@ -717,7 +717,7 @@ async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult, emi
       }
       try {
         let summary = '';
-        const text = await callText(emit, {
+        const text = await streamUserText(emit, {
           prompt: `${parts.join('\n\n')}\n\nQuestion: "${question}"\nType: ${plan.questionType}\nFocus: ${plan.sqlReason || plan.docReason}\nRespond in plain text: a 2-3 sentence executive summary using only the numbers above.`,
           maxOutputTokens: 500,
           onChunk: (chunk) => {
