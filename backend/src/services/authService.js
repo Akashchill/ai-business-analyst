@@ -18,7 +18,7 @@ async function seedUsers() {
   ];
   for (const u of defaults) {
     const hash = await bcrypt.hash(u.password, 10);
-    const id = uuidv4();
+    const id = `user:${u.email}`;
     users.set(u.email, { id, ...u, password: hash, createdAt: new Date().toISOString() });
   }
   console.log('👤 Default users seeded (admin / manager / analyst)');
@@ -60,6 +60,12 @@ export function getUserById(id) {
     if (u.id === id) return sanitize(u);
   }
   return null;
+}
+
+export function getUserByEmail(email) {
+  if (!email) return null;
+  const user = users.get(email);
+  return user ? sanitize(user) : null;
 }
 
 export function listUsers() {

@@ -39,8 +39,31 @@ function validateQueryInput(body) {
 }
 
 function sendSse(res, event, data) {
-  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  if (typeof res.flush === 'function') res.flush();
+  if (res.writableEnded || res.destroyed) return;
+  try {
+    const json = JSON.stringify(data, (_, v) => (typeof v === 'bigint' ? v.toString() : v));
+    res.write(`event: ${event}\ndata: ${json}\n\n`);
+    if (typeof res.flush === 'function') res.flush();
+  } catch (err) {
+    console.error('SSE write failed:', err.message);
+  }
+}
+
+function startSseKeepAlive(req, res) {
+  req.setTimeout(0);
+  res.setTimeout(0);
+  const heartbeat = setInterval(() => {
+    if (res.writableEnded || res.destroyed) {
+      clearInterval(heartbeat);
+      return;
+    }
+    res.write(': keepalive\n\n');
+    if (typeof res.flush === 'function') res.flush();
+  }, 15_000);
+  const stop = () => clearInterval(heartbeat);
+  req.on('close', stop);
+  res.on('close', stop);
+  return stop;
 }
 
 // POST /api/agent/query — full multi-agent pipeline (JSON or SSE stream)
@@ -55,8 +78,10 @@ router.post('/agent/query', requireQueryAccess, async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Content-Encoding', 'identity');
     res.flushHeaders?.();
 
+    const stopKeepAlive = startSseKeepAlive(req, res);
     try {
       const result = await runAgentPipeline(question, {
         sessionId,
@@ -85,6 +110,8 @@ router.post('/agent/query', requireQueryAccess, async (req, res) => {
       console.error('Agent pipeline error:', err);
       sendSse(res, 'error', { success: false, error: err.message });
       return res.end();
+    } finally {
+      stopKeepAlive();
     }
   }
 
