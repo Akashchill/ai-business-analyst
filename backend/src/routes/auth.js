@@ -1,5 +1,5 @@
 import express from 'express';
-import { registerUser, loginUser, listUsers, getUserById } from '../services/authService.js';
+import { registerUser, loginUser, listUsers, getUserById, getUserByEmail } from '../services/authService.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -30,7 +30,7 @@ router.post('/register', authenticate, requireRole('admin'), async (req, res) =>
 
 // GET /api/auth/me
 router.get('/me', authenticate, (req, res) => {
-  const user = getUserById(req.user.id);
+  const user = getUserById(req.user.id) || getUserByEmail(req.user.email);
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json({ user });
 });

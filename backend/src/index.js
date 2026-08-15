@@ -52,7 +52,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, async () => {
+const server = app.listen(PORT, async () => {
   console.log(`\n🚀 AI Analytics v2 running on http://localhost:${PORT}`);
   console.log(`📊 Health:  GET /api/health`);
   console.log(`🔐 Auth:    POST /api/auth/login`);
@@ -61,5 +61,10 @@ app.listen(PORT, async () => {
   // Non-blocking: warm AI suggestions cache after startup
   setTimeout(() => prewarmSuggestionCache(), 2000);
 });
+
+// SSE agent streams can run longer than Node's default 5-minute request timeout.
+server.requestTimeout = 0;
+server.headersTimeout = 0;
+server.timeout = 0;
 
 export default app;

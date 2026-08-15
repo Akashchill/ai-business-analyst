@@ -1,14 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
-  async rewrites() {
-    return [
-      {
-        source: '/api/:path*',
-        destination: `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/api/:path*`,
-      },
-    ];
-  },
+  // Gzip would wrap the /api SSE proxy and truncate chunked streams behind ALB.
+  compress: false,
 };
 
 export default nextConfig;
