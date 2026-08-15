@@ -24,6 +24,17 @@ const BLOCKED_KEYWORDS = [
 const AGGREGATE_FUNCS = ['COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'BOOL_AND', 'BOOL_OR', 'STRING_AGG', 'ARRAY_AGG'];
 
 /**
+ * Strip markdown fences / leading labels the LLM sometimes wraps around SQL.
+ */
+export function unwrapSql(sql) {
+  if (sql == null || typeof sql !== 'string') return sql;
+  let s = sql.trim();
+  s = s.replace(/^```(?:sql)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  s = s.replace(/^sql\s*:\s*/i, '').trim();
+  return s;
+}
+
+/**
  * Remove SQL comments so hidden keywords cannot bypass the blocklist.
  */
 export function stripSqlComments(sql) {
@@ -169,6 +180,7 @@ function validateTableAllowlist(sql, schema) {
  */
 export function validateSql(sql, options = {}) {
   const maxRows = options.maxRows ?? DEFAULT_MAX_ROWS;
+  sql = unwrapSql(sql);
 
   if (sql == null || typeof sql !== 'string' || !sql.trim()) {
     return { ok: false, error: 'SQL query is empty' };

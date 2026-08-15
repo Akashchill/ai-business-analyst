@@ -17,6 +17,12 @@ describe('validateSql', () => {
     assert.doesNotMatch(result.sql, /LIMIT/i);
   });
 
+  it('unwraps markdown-fenced SQL', () => {
+    const result = validateSql('```sql\nSELECT COUNT(*) FROM users\n```');
+    assert.equal(result.ok, true);
+    assert.match(result.sql, /SELECT COUNT\(\*\) FROM users/i);
+  });
+
   it('rejects empty SQL', () => {
     assert.equal(validateSql('').ok, false);
     assert.equal(validateSql(null).ok, false);

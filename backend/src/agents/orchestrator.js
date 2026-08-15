@@ -458,11 +458,20 @@ Rules:
 - Queries are validated in code before execution — they must pass the SQL guard (SELECT-only, no multiple statements, row LIMIT cap)
 - Add LIMIT 500 to queries that may return many rows
 - Use table aliases
-- If the query is impossible with this schema, set sql to null`;
+- Generate SQL for the CURRENT question only. Do not reuse date ranges or filters from earlier conversation turns unless this question still asks for them.
+- Do not add month/date WHERE filters unless the current question explicitly asks for a time range.
+- Top selling / top products: GROUP BY product name, ORDER BY SUM(quantity) or SUM(total) DESC. Do not require a date filter.
+- If a time filter would likely match no rows, omit it or use the latest available ordered_at values instead of NOW()-based months.
+- Never set sql to null when products, orders, or users exist in the schema. Produce a SELECT.`;
 
   const messages = [
-    ...conversationHistory.slice(-4).map(h => ({ role: h.role, content: h.content })),
-    { role: 'user', content: question },
+    ...conversationHistory.slice(-4).map(h => ({
+      role: h.role === 'assistant' ? 'assistant' : 'user',
+      content: h.role === 'assistant'
+        ? `[Previous answer, do not copy its filters]\n${h.content}`
+        : `[Previous question]\n${h.content}`,
+    })),
+    { role: 'user', content: `Current question (write SQL for this only):\n${question}` },
   ];
 
   if (priorAttempt?.sql) {
@@ -504,7 +513,10 @@ async function runSqlWithGuard(question, schema, plan, conversationHistory, dbTy
   for (let attempt = 0; attempt <= SQL_MAX_RETRIES; attempt++) {
     sqlMeta = await sqlAgent(question, schema, plan, conversationHistory, priorAttempt, emit);
 
-    if (!sqlMeta.sql) break;
+    if (!sqlMeta.sql) {
+      sqlMeta.error = sqlMeta.explanation || 'SQL agent returned no query';
+      break;
+    }
 
     const validation = validateSql(sqlMeta.sql, { schema, maxRows: 500 });
     if (!validation.ok) {
@@ -523,15 +535,9 @@ async function runSqlWithGuard(question, schema, plan, conversationHistory, dbTy
       sqlResult = await executeQuery(sqlMeta.sql, [], dbType);
       sqlMeta.error = undefined;
 
-      // Valid SQL + 0 rows: do not retry when schema has tables — empty data
-      // is usually migrations/seed, not something more LLM attempts will fix.
       const empty = !sqlResult.rows || sqlResult.rows.length === 0;
-      const hasTables = schema && Object.keys(schema).length > 0;
-      if (empty && expectsSqlRows(plan) && hasTables) {
-        break;
-      }
       if (empty && expectsSqlRows(plan) && attempt < SQL_MAX_RETRIES) {
-        sqlMeta.error = 'Query returned 0 rows but the question expects data. Check filters, date ranges, joins, and table/column names.';
+        sqlMeta.error = 'Query returned 0 rows. Drop or widen date filters, avoid NOW()-based months if data is older, and verify JOINs and column names.';
         priorAttempt = { sql: sqlMeta.sql, error: sqlMeta.error, schema };
         sqlResult = null;
         sqlRetries++;
@@ -679,6 +685,22 @@ async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult, emi
         'Try broadening filters or rephrasing the question',
       ],
       severity: 'neutral',
+    });
+  }
+
+  if (!hasSqlRows && !hasRag) {
+    return sanitizeInsight({
+      summary: sqlMeta?.explanation || sqlMeta?.error
+        || 'Could not generate a database query for this question.',
+      keyFindings: [
+        ...(sqlMeta?.error ? [sqlMeta.error] : []),
+        ...(sqlMeta?.explanation && sqlMeta.explanation !== sqlMeta.error ? [sqlMeta.explanation] : []),
+      ],
+      recommendations: [
+        'Try a simpler question such as "top 10 products by revenue"',
+        'Avoid carrying over a previous month/date filter unless you still want that range',
+      ],
+      severity: 'warning',
     });
   }
 
