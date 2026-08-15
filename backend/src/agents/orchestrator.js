@@ -8,7 +8,7 @@ import { generateAgentText, generateAgentObject, streamAgentText, streamAgentObj
 import { z } from 'zod';
 import { getDatabaseSchema, executeQuery } from '../config/database.js';
 import { retrieveRelevantChunks, getDocumentStats } from '../services/ragService.js';
-import { validateSql } from '../utils/sqlGuard.js';
+import { validateSql, extractSqlFromText } from '../utils/sqlGuard.js';
 import { sanitizeInsight } from '../utils/outputGuard.js';
 import { buildInsightFromData, shouldUseLlmInsight, isAiQuotaError } from '../utils/insightBuilder.js';
 import { pickChartByRules } from '../utils/chartRules.js';
@@ -34,9 +34,15 @@ const plannerSchema = z.object({
 });
 
 const sqlSchema = z.object({
-  sql: z.string().nullable(),
-  explanation: z.string(),
-  confidence: z.number(),
+  sql: z.preprocess(
+    (v) => (v == null || v === '' ? null : String(v)),
+    z.string().nullable(),
+  ),
+  explanation: z.preprocess((v) => (v == null ? '' : String(v)), z.string()),
+  confidence: z.preprocess((v) => {
+    const n = typeof v === 'number' ? v : parseFloat(String(v));
+    return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.5;
+  }, z.number().min(0).max(1)),
 });
 
 const visualizationSchema = z.object({
@@ -498,10 +504,25 @@ Return corrected SQL that passes validation (single SELECT only) and answers the
   }
 
   try {
-    return await generateAgentObject({ system, messages, schema: sqlSchema, maxOutputTokens: 1000 });
-  } catch {
-    return { sql: null, explanation: 'Failed to generate SQL', confidence: 0 };
+    const text = await generateAgentText({
+      system: `${system}\n\nReply with a single PostgreSQL SELECT only. No markdown, no JSON.`,
+      messages,
+      maxOutputTokens: 1000,
+    });
+    const sql = extractSqlFromText(text);
+    if (sql) return { sql, explanation: 'Generated SQL', confidence: 0.7 };
+  } catch (textErr) {
+    console.warn('SQL text generation failed:', textErr.message);
   }
+
+  try {
+    const result = await generateAgentObject({ system, messages, schema: sqlSchema, maxOutputTokens: 1000 });
+    if (result?.sql) return result;
+  } catch (err) {
+    console.warn('SQL generateObject failed:', err.message);
+  }
+
+  return { sql: null, explanation: 'Failed to generate SQL', confidence: 0 };
 }
 
 async function runSqlWithGuard(question, schema, plan, conversationHistory, dbType, emit) {

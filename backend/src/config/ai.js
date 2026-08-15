@@ -3,7 +3,7 @@
  *
  * Chat (.env):
  *   AI_PROVIDER=google          # google | anthropic | openai
- *   AI_MODEL=gemini-2.5-pro
+ *   AI_MODEL=gemini-2.5-flash
  *   GEMINI_API_KEY=...
  *
  * Embeddings (.env):
@@ -20,7 +20,7 @@ import { secretEnv } from './secrets.js';
 dotenv.config();
 
 const PROVIDER = (process.env.AI_PROVIDER || 'google').toLowerCase();
-const MODEL_ID = process.env.AI_MODEL || 'gemini-2.5-pro';
+const MODEL_ID = process.env.AI_MODEL || 'gemini-2.5-flash';
 const EMBED_MODEL = process.env.AI_EMBED_MODEL || 'gemini-embedding-001';
 const EMBED_DIMENSIONS = parseInt(process.env.AI_EMBED_DIMENSIONS || '1536', 10);
 
@@ -53,6 +53,15 @@ export function getChatModel() {
 export function getEmbeddingModel() {
   assertEmbeddingConfigured();
   return googleProvider.embedding(EMBED_MODEL);
+}
+
+function googleChatOptions() {
+  return {
+    google: {
+      // 2.5 Flash thinking tokens steal the JSON budget and break generateObject.
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  };
 }
 
 function googleEmbedOptions(taskType) {
@@ -107,6 +116,7 @@ export async function generateAgentText({ system, prompt, messages, maxOutputTok
     system,
     ...(messages ? { messages } : { prompt }),
     maxOutputTokens,
+    providerOptions: googleChatOptions(),
   });
 
   return text;
@@ -121,6 +131,7 @@ export async function streamAgentText({ system, prompt, messages, maxOutputToken
     system,
     ...(messages ? { messages } : { prompt }),
     maxOutputTokens,
+    providerOptions: googleChatOptions(),
   });
 
   let text = '';
@@ -141,6 +152,7 @@ export async function streamAgentObject({ system, prompt, messages, schema, maxO
     system,
     ...(messages ? { messages } : { prompt }),
     maxOutputTokens,
+    providerOptions: googleChatOptions(),
   });
 
   if (onPartial) {
@@ -163,6 +175,7 @@ export async function generateAgentObject({ system, prompt, messages, schema, ma
     system,
     ...(messages ? { messages } : { prompt }),
     maxOutputTokens,
+    providerOptions: googleChatOptions(),
   });
 
   return object;

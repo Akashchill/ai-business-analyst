@@ -34,6 +34,15 @@ export function unwrapSql(sql) {
   return s;
 }
 
+/** Pull a SELECT statement out of free-form model text. */
+export function extractSqlFromText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const unwrapped = unwrapSql(text);
+  const match = unwrapped.match(/\bSELECT\b[\s\S]+/i);
+  if (!match) return null;
+  return match[0].replace(/;+\s*$/, '').trim();
+}
+
 /**
  * Remove SQL comments so hidden keywords cannot bypass the blocklist.
  */

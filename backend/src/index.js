@@ -56,7 +56,8 @@ const server = app.listen(PORT, async () => {
   console.log(`\n🚀 AI Analytics v2 running on http://localhost:${PORT}`);
   console.log(`📊 Health:  GET /api/health`);
   console.log(`🔐 Auth:    POST /api/auth/login`);
-  console.log(`🤖 Query:   POST /api/agent/query\n`);
+  console.log(`🤖 Query:   POST /api/agent/query`);
+  console.log(`🧠 Model:   ${process.env.AI_PROVIDER || 'google'} / ${process.env.AI_MODEL || 'gemini-2.5-flash'}\n`);
   await logDatabaseStatus();
   // Non-blocking: warm AI suggestions cache after startup
   setTimeout(() => prewarmSuggestionCache(), 2000);
