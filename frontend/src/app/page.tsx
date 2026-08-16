@@ -120,10 +120,11 @@ export default function HomePage() {
     ]);
     setIsLoading(true);
 
-    historyRef.current = [...historyRef.current.slice(-8), { role: 'user', content: q }];
+    const priorHistory = historyRef.current.slice(-8);
+    historyRef.current = [...priorHistory, { role: 'user', content: q }];
 
     try {
-      const result = await agentQueryStream(q, token, historyRef.current, (evt) => {
+      const result = await agentQueryStream(q, token, priorHistory, (evt) => {
         setMessages(prev => prev.map(m => {
           if (m.id !== aid) return m;
 

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateSql, stripSqlComments } from './sqlGuard.js';
+import { validateSql, stripSqlComments, extractSqlFromText } from './sqlGuard.js';
 
 describe('stripSqlComments', () => {
   it('removes line and block comments', () => {
@@ -77,5 +77,17 @@ describe('validateSql', () => {
   it('allows UNION SELECT (read-only)', () => {
     const result = validateSql('SELECT id FROM users UNION SELECT id FROM orders LIMIT 10');
     assert.equal(result.ok, true);
+  });
+});
+
+describe('extractSqlFromText', () => {
+  it('pulls SELECT out of prose', () => {
+    const sql = extractSqlFromText('Sure.\nSELECT COUNT(*) FROM users;');
+    assert.match(sql, /SELECT COUNT\(\*\) FROM users/i);
+  });
+
+  it('pulls SELECT out of JSON', () => {
+    const sql = extractSqlFromText('{"sql":"SELECT COUNT(*) FROM users","explanation":"count","confidence":0.9}');
+    assert.match(sql, /SELECT COUNT\(\*\) FROM users/i);
   });
 });

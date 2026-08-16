@@ -35,8 +35,8 @@ const plannerSchema = z.object({
 
 const sqlSchema = z.object({
   sql: z.preprocess(
-    (v) => (v == null || v === '' ? null : String(v)),
-    z.string().nullable(),
+    (v) => (v == null ? '' : String(v)),
+    z.string().min(1),
   ),
   explanation: z.preprocess((v) => (v == null ? '' : String(v)), z.string()),
   confidence: z.preprocess((v) => {
@@ -236,7 +236,7 @@ Rules:
 - "tell me about X" / "what is our policy" style questions are company_documents when docs exist, even if X sounds like a business term.`;
 
   try {
-    const result = await generateAgentObject({ prompt, schema: intentSchema, maxOutputTokens: 200 });
+    const result = await generateAgentObject({ prompt, schema: intentSchema, maxOutputTokens: 1024 });
     return correctIntent(result, question, hasDocuments);
   } catch {
     return heuristicIntent(question, hasDocuments);
@@ -413,7 +413,7 @@ Rules:
 - Do not choose SQL for "tell me about X" / policy / document explanation questions.`;
 
   try {
-    const plan = await generateAgentObject({ prompt, schema: plannerSchema, maxOutputTokens: 280 });
+    const plan = await generateAgentObject({ prompt, schema: plannerSchema, maxOutputTokens: 1024 });
     if (shouldPreferDocuments(question, hasDocuments)) {
       return forceDocumentPlan(plan, question);
     }
@@ -447,9 +447,19 @@ function expectsSqlRows(plan) {
 
 // ── 2. SQL Agent ──────────────────────────────────────────────────────────────
 
-async function sqlAgent(question, schema, plan, conversationHistory = [], priorAttempt = null, emit = null) {
+function buildSqlPrompt(question, schema, plan, priorAttempt = null) {
   const schemaText = schemaToText(schema);
-  const system = `You are an expert PostgreSQL analyst.
+
+  const retryBlock = priorAttempt?.sql
+    ? `\nThe SELECT you just wrote for THIS question failed. Rewrite a new SELECT for the same question — do not return the failed statement unchanged.
+Failed SQL:
+${priorAttempt.sql}
+Error / issue:
+${priorAttempt.error}
+`
+    : '';
+
+  return `You are an expert PostgreSQL analyst.
 
 ${schemaText}
 
@@ -464,75 +474,61 @@ Rules:
 - Queries are validated in code before execution — they must pass the SQL guard (SELECT-only, no multiple statements, row LIMIT cap)
 - Add LIMIT 500 to queries that may return many rows
 - Use table aliases
-- Generate SQL for the CURRENT question only. Do not reuse date ranges or filters from earlier conversation turns unless this question still asks for them.
-- Do not add month/date WHERE filters unless the current question explicitly asks for a time range.
+- Write a brand-new SELECT for this question only. Do not reuse, adapt, or copy any earlier query.
+- Do not add month/date WHERE filters unless this question explicitly asks for a time range.
 - Top selling / top products: GROUP BY product name, ORDER BY SUM(quantity) or SUM(total) DESC. Do not require a date filter.
 - If a time filter would likely match no rows, omit it or use the latest available ordered_at values instead of NOW()-based months.
-- Never set sql to null when products, orders, or users exist in the schema. Produce a SELECT.`;
+- Always produce a SELECT. Never return an empty sql field.
 
-  const messages = [
-    ...conversationHistory.slice(-4).map(h => ({
-      role: h.role === 'assistant' ? 'assistant' : 'user',
-      content: h.role === 'assistant'
-        ? `[Previous answer, do not copy its filters]\n${h.content}`
-        : `[Previous question]\n${h.content}`,
-    })),
-    { role: 'user', content: `Current question (write SQL for this only):\n${question}` },
-  ];
+${retryBlock}
+Question: ${question}
 
-  if (priorAttempt?.sql) {
-    const schemaSection = priorAttempt.schema
-      ? `\n\nDatabase schema (verify table/column names):\n${schemaToText(priorAttempt.schema)}`
-      : '';
-    messages.push({
-      role: 'user',
-      content: `Your previous SQL failed validation, errored at runtime, or returned 0 rows when data was expected. Fix it.
-
-Planner context:
-- SQL reason: ${plan.sqlReason}
-- Question type: ${plan.questionType}
-- Complexity: ${plan.complexity}
-
-Previous SQL:
-${priorAttempt.sql}
-
-Error / issue:
-${priorAttempt.error}${schemaSection}
-
-Return corrected SQL that passes validation (single SELECT only) and answers the question.`,
-    });
-  }
-
-  try {
-    const text = await generateAgentText({
-      system: `${system}\n\nReply with a single PostgreSQL SELECT only. No markdown, no JSON.`,
-      messages,
-      maxOutputTokens: 1000,
-    });
-    const sql = extractSqlFromText(text);
-    if (sql) return { sql, explanation: 'Generated SQL', confidence: 0.7 };
-  } catch (textErr) {
-    console.warn('SQL text generation failed:', textErr.message);
-  }
-
-  try {
-    const result = await generateAgentObject({ system, messages, schema: sqlSchema, maxOutputTokens: 1000 });
-    if (result?.sql) return result;
-  } catch (err) {
-    console.warn('SQL generateObject failed:', err.message);
-  }
-
-  return { sql: null, explanation: 'Failed to generate SQL', confidence: 0 };
+Reply with a single PostgreSQL SELECT only. No markdown, no JSON.`;
 }
 
-async function runSqlWithGuard(question, schema, plan, conversationHistory, dbType, emit) {
+async function sqlAgent(question, schema, plan, priorAttempt = null) {
+  const errors = [];
+  const prompt = buildSqlPrompt(question, schema, plan, priorAttempt);
+
+  try {
+    const text = await generateAgentText({ prompt, maxOutputTokens: 4096 });
+    const sql = extractSqlFromText(text);
+    if (sql) return { sql, explanation: 'Generated SQL', confidence: 0.7 };
+    if (text?.trim()) errors.push(`model returned no SELECT (got: ${text.trim().slice(0, 180)})`);
+    else errors.push('model returned empty text');
+  } catch (textErr) {
+    console.warn('SQL text generation failed:', textErr.message);
+    errors.push(textErr.message);
+  }
+
+  try {
+    const result = await generateAgentObject({
+      prompt: `${prompt}\n\nReturn JSON with sql, explanation, and confidence.`,
+      schema: sqlSchema,
+      maxOutputTokens: 4096,
+    });
+    if (result?.sql) return result;
+    if (result?.explanation) errors.push(result.explanation);
+  } catch (err) {
+    console.warn('SQL generateObject failed:', err.message);
+    errors.push(err.message);
+  }
+
+  return {
+    sql: null,
+    explanation: errors.length ? `Failed to generate SQL: ${errors.join(' | ')}` : 'Failed to generate SQL',
+    confidence: 0,
+  };
+}
+
+async function runSqlWithGuard(question, schema, plan, dbType, emit) {
   let sqlMeta = null;
   let sqlResult = null;
   let sqlRetries = 0;
   let priorAttempt = null;
 
   for (let attempt = 0; attempt <= SQL_MAX_RETRIES; attempt++) {
-    sqlMeta = await sqlAgent(question, schema, plan, conversationHistory, priorAttempt, emit);
+    sqlMeta = await sqlAgent(question, schema, plan, priorAttempt);
 
     if (!sqlMeta.sql) {
       sqlMeta.error = sqlMeta.explanation || 'SQL agent returned no query';
@@ -926,7 +922,7 @@ export async function runAgentPipeline(question, options = {}) {
     tasks.push((async () => {
       const stepIdx = steps.length;
       pushRunningStep(steps, 'sql', emit);
-      const sqlRun = await runSqlWithGuard(question, schema, plan, conversationHistory, dbType, emit);
+      const sqlRun = await runSqlWithGuard(question, schema, plan, dbType, emit);
       sqlMeta = sqlRun.sqlMeta;
       sqlResult = sqlRun.sqlResult;
       sqlRetries = sqlRun.sqlRetries;

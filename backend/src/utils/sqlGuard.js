@@ -38,6 +38,15 @@ export function unwrapSql(sql) {
 export function extractSqlFromText(text) {
   if (!text || typeof text !== 'string') return null;
   const unwrapped = unwrapSql(text);
+
+  const jsonSql = unwrapped.match(/"sql"\s*:\s*"((?:\\.|[^"\\])*)"/i);
+  if (jsonSql?.[1]) {
+    const fromJson = jsonSql[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\t/g, ' ');
+    if (/\bSELECT\b/i.test(fromJson)) {
+      return fromJson.replace(/;+\s*$/, '').trim();
+    }
+  }
+
   const match = unwrapped.match(/\bSELECT\b[\s\S]+/i);
   if (!match) return null;
   return match[0].replace(/;+\s*$/, '').trim();

@@ -55,13 +55,39 @@ export function getEmbeddingModel() {
   return googleProvider.embedding(EMBED_MODEL);
 }
 
+function isThinkingConfigError(err) {
+  const msg = String(err?.message || err || '');
+  return /thinkingBudget|thinking_budget|thinkingConfig|thinking_config|cannot disable thinking|does not support setting thinking/i.test(msg);
+}
+
+/**
+ * Gemini 2.5 Flash: disable thinking so output tokens are not eaten (needed for generateObject).
+ * Gemini 2.5 Pro: thinking cannot be turned off — omit the option.
+ */
 function googleChatOptions() {
+  if (PROVIDER !== 'google') return {};
+  const id = MODEL_ID.toLowerCase();
+  if (id.includes('pro') && !id.includes('flash')) return {};
   return {
     google: {
-      // 2.5 Flash thinking tokens steal the JSON budget and break generateObject.
-      thinkingConfig: { thinkingBudget: 0 },
+      thinkingConfig: {
+        thinkingBudget: 0,
+        includeThoughts: false,
+      },
     },
   };
+}
+
+async function withThinkingFallback(run) {
+  try {
+    return await run(googleChatOptions());
+  } catch (err) {
+    if (PROVIDER === 'google' && isThinkingConfigError(err)) {
+      console.warn('Gemini rejected thinkingConfig; retrying without it:', err.message);
+      return await run({});
+    }
+    throw err;
+  }
 }
 
 function googleEmbedOptions(taskType) {
@@ -111,74 +137,80 @@ export function assertEmbeddingConfigured() {
 export async function generateAgentText({ system, prompt, messages, maxOutputTokens = 1024 }) {
   assertAiConfigured();
 
-  const { text } = await generateText({
-    model: getChatModel(),
-    system,
-    ...(messages ? { messages } : { prompt }),
-    maxOutputTokens,
-    providerOptions: googleChatOptions(),
+  return withThinkingFallback(async (providerOptions) => {
+    const { text } = await generateText({
+      model: getChatModel(),
+      system,
+      ...(messages ? { messages } : { prompt }),
+      maxOutputTokens,
+      providerOptions,
+    });
+    return text;
   });
-
-  return text;
 }
 
 /** Stream plain-text tokens; optional onChunk called for each delta. */
 export async function streamAgentText({ system, prompt, messages, maxOutputTokens = 1024, onChunk }) {
   assertAiConfigured();
 
-  const result = streamText({
-    model: getChatModel(),
-    system,
-    ...(messages ? { messages } : { prompt }),
-    maxOutputTokens,
-    providerOptions: googleChatOptions(),
-  });
+  return withThinkingFallback(async (providerOptions) => {
+    const result = streamText({
+      model: getChatModel(),
+      system,
+      ...(messages ? { messages } : { prompt }),
+      maxOutputTokens,
+      providerOptions,
+    });
 
-  let text = '';
-  for await (const chunk of result.textStream) {
-    text += chunk;
-    if (onChunk) onChunk(chunk);
-  }
-  return text;
+    let text = '';
+    for await (const chunk of result.textStream) {
+      text += chunk;
+      if (onChunk) onChunk(chunk);
+    }
+    return text;
+  });
 }
 
 /** Stream structured JSON; onPartial called with each partial object update. */
 export async function streamAgentObject({ system, prompt, messages, schema, maxOutputTokens = 1024, onPartial }) {
   assertAiConfigured();
 
-  const result = streamObject({
-    model: getChatModel(),
-    schema,
-    system,
-    ...(messages ? { messages } : { prompt }),
-    maxOutputTokens,
-    providerOptions: googleChatOptions(),
-  });
+  return withThinkingFallback(async (providerOptions) => {
+    const result = streamObject({
+      model: getChatModel(),
+      schema,
+      system,
+      ...(messages ? { messages } : { prompt }),
+      maxOutputTokens,
+      providerOptions,
+    });
 
-  if (onPartial) {
-    for await (const partial of result.partialObjectStream) {
-      onPartial(partial);
+    if (onPartial) {
+      for await (const partial of result.partialObjectStream) {
+        onPartial(partial);
+      }
     }
-  }
 
-  const { object } = await result;
-  return object;
+    const { object } = await result;
+    return object;
+  });
 }
 
 /** Structured JSON via AI SDK generateObject + Zod schema. */
 export async function generateAgentObject({ system, prompt, messages, schema, maxOutputTokens = 1024 }) {
   assertAiConfigured();
 
-  const { object } = await generateObject({
-    model: getChatModel(),
-    schema,
-    system,
-    ...(messages ? { messages } : { prompt }),
-    maxOutputTokens,
-    providerOptions: googleChatOptions(),
+  return withThinkingFallback(async (providerOptions) => {
+    const { object } = await generateObject({
+      model: getChatModel(),
+      schema,
+      system,
+      ...(messages ? { messages } : { prompt }),
+      maxOutputTokens,
+      providerOptions,
+    });
+    return object;
   });
-
-  return object;
 }
 
 /**
