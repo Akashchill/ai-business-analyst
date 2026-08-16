@@ -8,6 +8,7 @@ import {
   ingestDocument, listDocuments, deleteDocument, getDocumentStats, getDocumentForDownload,
 } from '../services/ragService.js';
 import * as s3Service from '../services/s3Service.js';
+import { invalidateQueryCache } from '../services/queryCache.js';
 
 const router = express.Router();
 
@@ -83,6 +84,7 @@ router.post('/upload', authenticate, requirePermission('canUploadDocs'), upload.
 
     fs.unlink(req.file.path, () => {});
 
+    void invalidateQueryCache();
     res.status(201).json({ document: doc });
   } catch (err) {
     if (s3Uploaded && s3Key) {
@@ -138,6 +140,7 @@ router.delete('/:id', authenticate, requirePermission('canUploadDocs'), async (r
   try {
     const result = await deleteDocument(req.params.id);
     if (!result.existed) return res.status(404).json({ error: 'Document not found' });
+    void invalidateQueryCache();
     res.json({ success: true, chunksRemoved: result.chunksRemoved });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete document: ' + err.message });

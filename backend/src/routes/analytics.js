@@ -5,6 +5,8 @@ import { saveQuery, getHistory, clearHistory } from '../services/historyService.
 import { getSuggestedQuestions } from '../services/aiService.js';
 import { getDocumentStats } from '../services/ragService.js';
 import { optionalAuth, requireQueryAccess } from '../middleware/auth.js';
+import { getCachedQuery, setCachedQuery } from '../services/queryCache.js';
+import { getRedisStatus } from '../config/redis.js';
 
 const router = express.Router();
 
@@ -66,6 +68,37 @@ function startSseKeepAlive(req, res) {
   return stop;
 }
 
+function saveHistoryEntry(req, sessionId, question, result) {
+  return saveQuery({
+    sessionId: req.user?.id || sessionId,
+    userId: req.user?.id,
+    question,
+    sql: result.sql,
+    result: { rows: result.rows, rowCount: result.rowCount, duration: result.duration },
+    insight: result.insight?.summary || '',
+    chartType: result.chartType,
+  });
+}
+
+function withHistoryMeta(result, historyEntry, extra = {}) {
+  return {
+    ...result,
+    ...extra,
+    historyId: historyEntry.id,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function rememberResult(question, dbType, result) {
+  void setCachedQuery(question, dbType, result);
+}
+
+function replayCachedSse(res, cached, lookupMs) {
+  const steps = [{ agent: 'cache', status: 'done', duration: lookupMs }];
+  sendSse(res, 'step', { steps });
+  return { ...cached, cached: true, totalDuration: lookupMs, steps };
+}
+
 // POST /api/agent/query — full multi-agent pipeline (JSON or SSE stream)
 router.post('/agent/query', requireQueryAccess, async (req, res) => {
   const inputError = validateQueryInput(req.body);
@@ -83,6 +116,16 @@ router.post('/agent/query', requireQueryAccess, async (req, res) => {
 
     const stopKeepAlive = startSseKeepAlive(req, res);
     try {
+      const cacheStarted = Date.now();
+      const cached = await getCachedQuery(question, dbType);
+      if (cached) {
+        const lookupMs = Date.now() - cacheStarted;
+        const result = replayCachedSse(res, cached, lookupMs);
+        const historyEntry = saveHistoryEntry(req, sessionId, question, result);
+        sendSse(res, 'done', withHistoryMeta(result, historyEntry, { cached: true }));
+        return res.end();
+      }
+
       const result = await runAgentPipeline(question, {
         sessionId,
         conversationHistory: history,
@@ -90,21 +133,10 @@ router.post('/agent/query', requireQueryAccess, async (req, res) => {
         onEvent: (event, data) => sendSse(res, event, data),
       });
 
-      const historyEntry = saveQuery({
-        sessionId: req.user?.id || sessionId,
-        userId: req.user?.id,
-        question,
-        sql: result.sql,
-        result: { rows: result.rows, rowCount: result.rowCount, duration: result.duration },
-        insight: result.insight?.summary || '',
-        chartType: result.chartType,
-      });
+      rememberResult(question, dbType, result);
+      const historyEntry = saveHistoryEntry(req, sessionId, question, result);
 
-      sendSse(res, 'done', {
-        ...result,
-        historyId: historyEntry.id,
-        timestamp: new Date().toISOString(),
-      });
+      sendSse(res, 'done', withHistoryMeta(result, historyEntry));
       return res.end();
     } catch (err) {
       console.error('Agent pipeline error:', err);
@@ -116,24 +148,30 @@ router.post('/agent/query', requireQueryAccess, async (req, res) => {
   }
 
   try {
+    const cacheStarted = Date.now();
+    const cached = await getCachedQuery(question, dbType);
+    if (cached) {
+      const lookupMs = Date.now() - cacheStarted;
+      const result = {
+        ...cached,
+        cached: true,
+        totalDuration: lookupMs,
+        steps: [{ agent: 'cache', status: 'done', duration: lookupMs }],
+      };
+      const historyEntry = saveHistoryEntry(req, sessionId, question, result);
+      return res.json(withHistoryMeta(result, historyEntry, { cached: true }));
+    }
+
     const result = await runAgentPipeline(question, {
       sessionId,
       conversationHistory: history,
       dbType,
     });
 
-    // Save to history
-    const historyEntry = saveQuery({
-      sessionId: req.user?.id || sessionId,
-      userId: req.user?.id,
-      question,
-      sql: result.sql,
-      result: { rows: result.rows, rowCount: result.rowCount, duration: result.duration },
-      insight: result.insight?.summary || '',
-      chartType: result.chartType,
-    });
+    rememberResult(question, dbType, result);
+    const historyEntry = saveHistoryEntry(req, sessionId, question, result);
 
-    return res.json({ ...result, historyId: historyEntry.id, timestamp: new Date().toISOString() });
+    return res.json(withHistoryMeta(result, historyEntry));
   } catch (err) {
     console.error('Agent pipeline error:', err);
     return res.status(500).json({ success: false, error: err.message });
@@ -200,6 +238,7 @@ router.get('/health', async (req, res) => {
   res.json({
     status: dbOk ? 'ok' : 'degraded',
     database: dbOk ? 'connected' : 'disconnected',
+    redis: getRedisStatus(),
     documents: docStats,
     timestamp: new Date().toISOString(),
     version: '2.0.0',

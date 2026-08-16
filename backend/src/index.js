@@ -15,6 +15,7 @@ import docsRouter from './routes/docs.js';
 import reportsRouter from './routes/reports.js';
 import { prewarmSuggestionCache } from './services/aiService.js';
 import { logDatabaseStatus } from './config/database.js';
+import { connectRedis } from './config/redis.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -59,6 +60,7 @@ const server = app.listen(PORT, async () => {
   console.log(`🤖 Query:   POST /api/agent/query`);
   console.log(`🧠 Model:   ${process.env.AI_PROVIDER || 'google'} / ${process.env.AI_MODEL || 'gemini-2.5-flash'}\n`);
   await logDatabaseStatus();
+  await connectRedis();
   // Non-blocking: warm AI suggestions cache after startup
   setTimeout(() => prewarmSuggestionCache(), 2000);
 });

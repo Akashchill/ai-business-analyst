@@ -6,7 +6,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "db:migrate": "node scripts/migrate.js",
-    "test": "node --test src/utils/sqlGuard.test.js src/utils/insightBuilder.test.js src/utils/chartRules.test.js"
+    "test": "node --test src/utils/sqlGuard.test.js src/utils/insightBuilder.test.js src/utils/chartRules.test.js src/services/queryCache.test.js"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.25",
@@ -29,6 +29,7 @@
     "nodemailer": "^6.10.1",
     "pdf-parse": "^1.1.4",
     "pg": "^8.22.0",
+    "redis": "^6.2.1",
     "uuid": "^11.1.1",
     "word-extractor": "^1.0.4",
     "xlsx": "^0.18.5",
