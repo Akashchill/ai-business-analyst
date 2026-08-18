@@ -417,7 +417,14 @@ Two separate GitHub Actions workflows deploy independently:
 | `docker-publish-backend.yml` | Changes in `backend/**` | `business-analyst-backend-service` |
 | `docker-publish-frontend.yml` | Changes in `frontend/**` | `business-analyst-frontend-service` |
 
-Each workflow builds and pushes its image to ECR, then runs `aws ecs update-service --force-new-deployment` for that service only. You can also trigger either workflow manually from the Actions tab (`workflow_dispatch`).
+Each workflow runs **CI first**, then builds and pushes its image to ECR, then runs `aws ecs update-service --force-new-deployment` for that service only.
+
+- Backend CI: `npm test` (SQL guard, insight, chart rules)
+- Frontend CI: `npm run build` (TypeScript + Next.js compile)
+- Pull requests run **CI only** (no ECR, no ECS)
+- Push to `main` (or **Run workflow**) is: CI → ECR → ECS
+
+If CI fails, the image is not built or pushed. You can also trigger either workflow manually from the Actions tab (`workflow_dispatch`).
 
 If both `backend/` and `frontend/` change in one commit, **both** workflows run.
 

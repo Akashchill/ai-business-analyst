@@ -7,6 +7,10 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/docker-publish-backend.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/docker-publish-backend.yml'
   workflow_dispatch:
 
 env:
@@ -21,7 +25,30 @@ permissions:
   contents: read
 
 jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install
+        working-directory: backend
+        run: npm ci
+
+      - name: Test
+        working-directory: backend
+        run: npm test
+
   build-and-push:
+    needs: ci
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -71,6 +98,7 @@ jobs:
 
   deploy:
     needs: build-and-push
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Configure AWS credentials
