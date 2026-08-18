@@ -235,3 +235,78 @@ export function validateSql(sql, options = {}) {
 
   return enforceLimit(withoutComments, maxRows);
 }
+
+const JOIN_ALIAS_KEYWORDS = new Set([
+  'join', 'inner', 'left', 'right', 'full', 'cross', 'outer', 'on', 'where',
+  'group', 'order', 'limit', 'having', 'union', 'except', 'intersect', 'select',
+  'as', 'and', 'or', 'using', 'natural', 'lateral',
+]);
+
+function findTable(schema, name) {
+  if (!schema || typeof schema !== 'object') return null;
+  const key = Object.keys(schema).find((t) => t.toLowerCase() === name);
+  return key ? schema[key] : null;
+}
+
+function ordersSelfJoinAliases(sql) {
+  const aliases = new Set();
+  const fromJoin = /\b(?:FROM|JOIN)\s+orders\b(?:\s+(?:AS\s+)?([a-zA-Z_][\w]*))?/gi;
+  let m;
+  while ((m = fromJoin.exec(sql))) {
+    aliases.add('orders');
+    const alias = m[1];
+    if (alias && !JOIN_ALIAS_KEYWORDS.has(alias.toLowerCase())) aliases.add(alias);
+  }
+  return aliases;
+}
+
+function hasProductPairPredicate(sql) {
+  return /\b[a-zA-Z_][\w]*\.product_id\s*(?:<|>|<>|!=)\s*[a-zA-Z_][\w]*\.product_id\b/i.test(sql);
+}
+
+/**
+ * True when orders is self-joined on the row PK (`id`) while comparing two
+ * product_ids. That pattern can never return pairs: each order row has one product.
+ */
+export function isImpossibleOrderPkSelfJoin(sql) {
+  if (!sql || typeof sql !== 'string') return false;
+  if (!hasProductPairPredicate(sql)) return false;
+  const aliases = ordersSelfJoinAliases(sql);
+  if (aliases.size < 2 && !aliases.has('orders')) return false;
+
+  const idJoin = /\b([a-zA-Z_][\w]*)\.id\s*=\s*([a-zA-Z_][\w]*)\.id\b/gi;
+  let m;
+  while ((m = idJoin.exec(sql))) {
+    if (aliases.has(m[1]) && aliases.has(m[2]) && m[1].toLowerCase() !== m[2].toLowerCase()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Rewrite orders.id = orders.id pair joins to user_id (same customer).
+ * `orders` is one product per row — joining on the PK never finds two products.
+ */
+export function rewriteImpossibleOrderSelfJoin(sql, schema) {
+  if (!sql || typeof sql !== 'string') return sql;
+  if (!isImpossibleOrderPkSelfJoin(sql)) return sql;
+
+  if (schema && typeof schema === 'object' && Object.keys(schema).length) {
+    const orders = findTable(schema, 'orders');
+    if (!orders) return sql;
+    const cols = new Set((orders.columns || []).map((c) => String(c.name).toLowerCase()));
+    if (!cols.has('user_id') || !cols.has('product_id')) return sql;
+  }
+
+  const aliases = ordersSelfJoinAliases(sql);
+  return sql.replace(
+    /\b([a-zA-Z_][\w]*)\.id\s*=\s*([a-zA-Z_][\w]*)\.id\b/gi,
+    (full, a, b) => {
+      if (aliases.has(a) && aliases.has(b) && a.toLowerCase() !== b.toLowerCase()) {
+        return `${a}.user_id = ${b}.user_id`;
+      }
+      return full;
+    },
+  );
+}

@@ -8,7 +8,7 @@ import { generateAgentText, generateAgentObject, streamAgentText, streamAgentObj
 import { z } from 'zod';
 import { getDatabaseSchema, executeQuery } from '../config/database.js';
 import { retrieveRelevantChunks, getDocumentStats } from '../services/ragService.js';
-import { validateSql, extractSqlFromText } from '../utils/sqlGuard.js';
+import { validateSql, extractSqlFromText, rewriteImpossibleOrderSelfJoin, isImpossibleOrderPkSelfJoin } from '../utils/sqlGuard.js';
 import { sanitizeInsight } from '../utils/outputGuard.js';
 import { buildInsightFromData, shouldUseLlmInsight, isAiQuotaError } from '../utils/insightBuilder.js';
 import { pickChartByRules } from '../utils/chartRules.js';
@@ -78,6 +78,18 @@ async function getCachedSchema(dbType) {
   return schemaCache.data;
 }
 
+function schemaGrainNotes(schema) {
+  const notes = [];
+  const ordersKey = Object.keys(schema || {}).find((t) => t.toLowerCase() === 'orders');
+  if (!ordersKey) return notes;
+  const cols = new Set((schema[ordersKey].columns || []).map((c) => String(c.name).toLowerCase()));
+  if (cols.has('id') && cols.has('user_id') && cols.has('product_id')) {
+    notes.push('- `orders` has one product per row. `orders.id` is that row\'s PK, not a multi-item cart. There is no order_items table.');
+    notes.push('- Products purchased together: self-join `orders` on `user_id` (same customer) with `o1.product_id < o2.product_id`. Never join on `orders.id = orders.id` — that matches the same row and returns 0 pairs.');
+  }
+  return notes;
+}
+
 function schemaToText(schema) {
   const lines = ['## Database Schema'];
   for (const [table, { columns }] of Object.entries(schema)) {
@@ -88,6 +100,11 @@ function schemaToText(schema) {
       if (c.isForeignKey) s += ` [FK→${c.foreignTable}.${c.foreignColumn}]`;
       lines.push(s);
     }
+  }
+  const notes = schemaGrainNotes(schema);
+  if (notes.length) {
+    lines.push('\n## Schema grain');
+    lines.push(...notes);
   }
   return lines.join('\n');
 }
@@ -478,6 +495,7 @@ Rules:
 - Do not add month/date WHERE filters unless this question explicitly asks for a time range.
 - Top selling / top products: GROUP BY product name, ORDER BY SUM(quantity) or SUM(total) DESC. Do not require a date filter.
 - If a time filter would likely match no rows, omit it or use the latest available ordered_at values instead of NOW()-based months.
+- Frequently bought / purchased together: JOIN orders to itself on user_id (same customer), not on orders.id. Use o1.product_id < o2.product_id to avoid duplicate pairs.
 - Always produce a SELECT. Never return an empty sql field.
 
 ${retryBlock}
@@ -547,6 +565,11 @@ async function runSqlWithGuard(question, schema, plan, dbType, emit) {
     }
 
     sqlMeta.sql = validation.sql;
+    const rewritten = rewriteImpossibleOrderSelfJoin(sqlMeta.sql, schema);
+    if (rewritten !== sqlMeta.sql) {
+      const recheck = validateSql(rewritten, { schema, maxRows: 500 });
+      if (recheck.ok) sqlMeta.sql = recheck.sql;
+    }
 
     try {
       sqlResult = await executeQuery(sqlMeta.sql, [], dbType);
@@ -554,7 +577,9 @@ async function runSqlWithGuard(question, schema, plan, dbType, emit) {
 
       const empty = !sqlResult.rows || sqlResult.rows.length === 0;
       if (empty && expectsSqlRows(plan) && attempt < SQL_MAX_RETRIES) {
-        sqlMeta.error = 'Query returned 0 rows. Drop or widen date filters, avoid NOW()-based months if data is older, and verify JOINs and column names.';
+        sqlMeta.error = isImpossibleOrderPkSelfJoin(sqlMeta.sql)
+          ? 'Query returned 0 rows because orders was self-joined on orders.id. Each order row has one product_id — join on user_id (same customer) with o1.product_id < o2.product_id instead.'
+          : 'Query returned 0 rows. Drop or widen date filters, avoid NOW()-based months if data is older, and verify JOINs and column names.';
         priorAttempt = { sql: sqlMeta.sql, error: sqlMeta.error, schema };
         sqlResult = null;
         sqlRetries++;
@@ -694,13 +719,21 @@ async function insightAgent({ question, plan, sqlResult, sqlMeta, ragResult, emi
 
   // Empty SQL result: never call the insight LLM (~3s saved)
   if (sqlMeta?.sql && !hasSqlRows && !hasRag) {
+    const badJoin = isImpossibleOrderPkSelfJoin(sqlMeta.sql);
     return sanitizeInsight({
-      summary: 'The query ran successfully but returned no rows. Check that migrations have been applied and seed data exists for the tables involved.',
+      summary: badJoin
+        ? 'The query ran but returned no rows because orders was joined to itself on orders.id. Each order is a single product — pair products by the same customer (user_id) instead.'
+        : 'The query ran successfully but returned no rows. Check that migrations have been applied and seed data exists for the tables involved.',
       keyFindings: [`SQL attempted: ${sqlMeta.sql}`],
-      recommendations: [
-        'Verify analytics tables are migrated and seeded',
-        'Try broadening filters or rephrasing the question',
-      ],
+      recommendations: badJoin
+        ? [
+            'Ask again so the SQL agent can join orders on user_id with o1.product_id < o2.product_id',
+            'Verify completed orders exist for customers who bought more than one product',
+          ]
+        : [
+            'Verify analytics tables are migrated and seeded',
+            'Try broadening filters or rephrasing the question',
+          ],
       severity: 'neutral',
     });
   }
